@@ -4,13 +4,29 @@ Find chain targets that match your stats.
 
 ## Install
 
-1. Download [`torn-targetlist.user.js`](dist/torn-targetlist.user.js) and import it into Tampermonkey.
-2. Open Torn and click **Target list** in the lower-right corner.
-3. Sign in with your **Limited Torn API key**.
+Open the [script](dist/torn-targetlist.user.js) and copy all its code. Sign into GitHub with access to this private repository first.
 
-The backend address is already set to **https://targetlist.grusmedia.no**. No server address or FFScouter key needs entering in the script.
+### Tampermonkey
 
-While this repository is private, sign into GitHub with access to download it. Import newer downloads to update your script.
+1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
+2. Open its **Dashboard** and click **Add a new script**.
+3. Replace the starter code with the copied script, save it, and make sure it is enabled.
+
+On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([help](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q209)).
+
+### Torn PDA
+
+1. Open **Settings → Advanced Browser Settings** and turn on **Enable custom user scripts**.
+2. Open **Manage scripts**, tap **+**, and paste the copied script into **Paste source code**.
+3. Leave **Injection time** at **END**, tap **Add**, make sure the script is enabled, and reload Torn inside PDA.
+
+Torn PDA still needs testing on a device.
+
+## Start
+
+Open Torn, click **Target list** in the lower-right corner, and sign in with your **Limited Torn API key**.
+
+The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusmedia.no). You only need your Torn key.
 
 ## Use
 
@@ -20,25 +36,3 @@ While this repository is private, sign into GitHub with access to download it. I
 - **Approvals:** faction leaders and co-leaders can approve or reject suggestions.
 
 Your key is sent to the backend and Torn for login and kept only for your session. Only allowed factions can use the list. Battle stats are estimates; attacks are manual.
-
-## Development
-
-Use Node.js 24 or later. Build and run the checks:
-
-```sh
-npm run build
-npm run check
-npm test
-```
-
-For the mocked desktop/mobile browser checks:
-
-```sh
-npm install
-npx playwright install chromium
-npm run test:browser
-```
-
-An existing Chromium browser can be selected with `TARGETLIST_BROWSER_PATH`. Rebuild and commit `dist/torn-targetlist.user.js` after source changes. Browser tests use mock data and save screenshots in ignored `artifacts/`.
-
-The separate [backend repository](https://github.com/Grussniffer/torn-targetlist-backend) contains server setup, Supabase configuration and FFScouter integration. Keep server secrets there. Tampermonkey is supported; Torn PDA still needs device testing.
