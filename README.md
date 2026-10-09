@@ -17,7 +17,7 @@ On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([
 ### Torn PDA
 
 1. Open **Settings → Advanced Browser Settings** and turn on **Enable custom user scripts**.
-2. Open **Manage scripts**, tap **+**, and paste the copied script into **Paste source code**.
+2. Open **Manage scripts**, tap **+**, name it **Torn Target List**, and paste the copied script into **Paste source code**.
 3. Leave **Injection time** at **END**, tap **Add**, make sure the script is enabled, and reload Torn inside PDA.
 
 Torn PDA still needs testing on a device.
