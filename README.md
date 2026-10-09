@@ -4,7 +4,7 @@ Find chain targets for **North West Alliance**.
 
 ## Install
 
-[**Install NWA Target Finder**](https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js)
+[**Install NWA Target Finder**](https://raw.githubusercontent.com/Grussniffer/nwa-targetlist-script/codex/initial/dist/torn-targetlist.user.js)
 
 ### Tampermonkey
 
@@ -24,7 +24,7 @@ On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([
 2. Open **Manage scripts → +**. Tap **Configure** beside **Remote load/update**, and enter this link in **Remote URL**:
 
    ```text
-   https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js
+   https://raw.githubusercontent.com/Grussniffer/nwa-targetlist-script/codex/initial/dist/torn-targetlist.user.js
    ```
 
 3. Tap **Fetch → Load**, choose **Continue** if permissions appear, and reload Torn inside PDA.

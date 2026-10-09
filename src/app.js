@@ -1,5 +1,5 @@
 // Keep this service hostname and @connect in metadata.txt in sync when deploying elsewhere.
-const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.1' });
+const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.2' });
 
 const previousHost = document.getElementById('torn-targetlist-host');
 const mountedVersion = previousHost?.getAttribute('data-nwa-version') || '';
