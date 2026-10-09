@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NWA Target Finder
 // @namespace    torn-faction-targetlist
-// @version      0.3.1
+// @version      0.3.2
 // @description  North West Alliance chain targets.
 // @downloadURL  https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js
 // @updateURL    https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js
@@ -84,7 +84,7 @@ const TargetListCore = (() => {
 })();
 
 // Keep this service hostname and @connect in metadata.txt in sync when deploying elsewhere.
-const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.3.1' });
+const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.3.2' });
 
 const previousHost = document.getElementById('torn-targetlist-host');
 const mountedVersion = previousHost?.getAttribute('data-nwa-version') || '';
@@ -368,7 +368,7 @@ function mountTargetList() {
         if (!assessment?.suggested || !assessment.ready) continue;
         state.lastTargetId = target.id; savePreferences();
         findNotice(`Opening ${latest.name || 'target'}…`);
-        window.location.assign(`https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}`);
+        window.location.assign(`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`);
         return;
       }
       const notice = !state.targets.length ? 'The NWA target pool is empty. Suggest targets in settings.'
@@ -622,7 +622,7 @@ function mountTargetList() {
       const check = button(state.pendingChecks.has(target.id) ? 'Checking…' : 'Check status', () => void checkStatus(target.id)); check.disabled = state.pendingChecks.has(target.id) || state.loading;
       actions.append(check);
       if (assessment.ready) {
-        const attack = link('Attack ↗', `https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}`, 'attack');
+        const attack = link('Attack ↗', `https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`, 'attack');
         const guardAttack = event => {
           const latest = state.targets.find(t => t.id === target.id);
           if (!latest || !state.token || Date.parse(state.expiresAt) <= Date.now() || !C.assess(latest, state.player, state.maxRatio).ready) {

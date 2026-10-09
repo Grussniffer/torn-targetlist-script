@@ -366,7 +366,7 @@ test('NWA checks a fresh suitable target live before opening its attack page in 
   assert.deepEqual(app.navigations, [], 'a cached Okay status must not navigate');
   app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
   await flush();
-  assert.deepEqual(app.navigations, [`https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}`]);
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
   assert.equal(app.requests.length, before + 1, 'opening the attack page does not send an attack request');
 });
 
@@ -389,7 +389,7 @@ test('NWA skips unavailable, newly friendly, and removed targets before opening 
   assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${candidates[4].id}/status`);
   app.response(app.requests.at(-1), { id: candidates[4].id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
   await flush();
-  assert.deepEqual(app.navigations, [`https://www.torn.com/loader.php?sid=attack&user2ID=${candidates[4].id}`]);
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${candidates[4].id}`]);
   assert.equal(app.storage.get(app.storageKey).token, SESSION);
 });
 
@@ -434,7 +434,7 @@ test('NWA bounds unavailable-target checks to five per click', async () => {
   assert.equal(app.requests.length, before + 6, 'the next click advances beyond the recently unavailable first five');
   assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${candidates[5].id}/status`);
   app.response(app.requests.at(-1), { id: candidates[5].id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
-  assert.deepEqual(app.navigations, [`https://www.torn.com/loader.php?sid=attack&user2ID=${candidates[5].id}`]);
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${candidates[5].id}`]);
 });
 
 test('a restored session loads an authorized pool before NWA checks a target', async () => {
@@ -475,7 +475,7 @@ test('NWA recovers an empty or unknown-stat pool after background estimates beco
     assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${target.id}/status`);
     assert.deepEqual(app.navigations, []);
     app.response(app.requests.at(-1), { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
-    assert.deepEqual(app.navigations, [`https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}`]);
+    assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
   }
 });
 
@@ -506,7 +506,7 @@ test('NWA refreshes a pool older than 30 seconds before selecting a live target'
   assert.equal(app.requests.length, before + 2);
   assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${updated.id}/status`);
   app.response(app.requests.at(-1), { id: updated.id, status: { state: 'Okay' }, checkedAt: new Date(NOW + 30_001).toISOString() }); await flush();
-  assert.deepEqual(app.navigations, [`https://www.torn.com/loader.php?sid=attack&user2ID=${updated.id}`]);
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${updated.id}`]);
 });
 
 test('signout, expiry, or a refreshed pool prevents an old NWA status response from navigating', async () => {

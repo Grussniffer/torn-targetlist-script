@@ -304,7 +304,7 @@ try {
   const quick = await mount();
   await login(quick);
   await shadow(quick, '.settings-toggle', 'click');
-  const attackUrl = 'https://www.torn.com/loader.php?sid=attack&user2ID=101';
+  const attackUrl = 'https://www.torn.com/page.php?sid=attack&user2ID=101';
   let destination, statusRequests;
   await quick.route(attackUrl, async route => {
     // Fulfill this one destination locally; no Torn page or attack request is sent.
@@ -359,7 +359,7 @@ try {
 
   await cardAction(main, 101);
   await wait(main, () => Boolean(window.__targetlistShadow.querySelector('a.attack')));
-  assert.equal((await cardSnapshot(main, 101)).attack, 'https://www.torn.com/loader.php?sid=attack&user2ID=101');
+  assert.equal((await cardSnapshot(main, 101)).attack, 'https://www.torn.com/page.php?sid=attack&user2ID=101');
   await cardAction(main, 102);
   await wait(main, () => !window.__targetlistShadow.textContent.includes('Checking…'));
   assert.match((await cardSnapshot(main, 102)).text, /Hospital/);
