@@ -33,9 +33,9 @@ On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([
 
 Open Torn and click the green **NWA** button on the right edge. Sign in with your **Limited Torn API key** the first time.
 
-NWA prepares targets in the background. Click **NWA** to open a target within your stat limit that was recently confirmed available. You start the attack yourself. On first load, or when checks are old, NWA checks availability before opening a target and tries up to five matches.
+NWA prepares targets in the background. Click **NWA** to open a target within your stat range that was recently confirmed available. You start the attack yourself. On first load, or when checks are old, NWA checks availability before opening a target and tries up to five matches.
 
-The small **⚙** underneath opens settings, the target list, and suggestions. Your stat limit is saved between pages.
+The small **⚙** underneath opens settings, the target list, and suggestions. Set **Min** and **Max** target stats as percentages of your own total; NWA only picks targets within that range. The default is **10–60%**, with the equivalent stat totals shown underneath. Your settings are saved between pages, and your existing maximum is kept when updating. Set **Min** to **0%** to include weaker targets.
 
 <img src="docs/images/nwa-controls.png" width="720" alt="Actual NWA controls with arrows: NWA finds a target and the gear underneath opens settings">
 
@@ -45,7 +45,7 @@ The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusm
 
 ## Use
 
-- **Targets:** browse the list or filter by estimated stats.
+- **Targets:** browse the list or filter by estimated stats. **Possible matches** applies both your minimum and maximum.
 - **Check status:** check a target before opening its attack page.
 - **Suggestions:** suggest a player or faction with a required comment.
 - **Approvals:** faction leaders and co-leaders can approve or reject suggestions.

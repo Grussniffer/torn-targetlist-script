@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NWA Target Finder
 // @namespace    torn-faction-targetlist
-// @version      0.4.2
+// @version      0.4.3
 // @description  North West Alliance chain targets.
 // @downloadURL  https://raw.githubusercontent.com/Grussniffer/nwa-targetlist-script/codex/initial/dist/torn-targetlist.user.js
 // @updateURL    https://raw.githubusercontent.com/Grussniffer/nwa-targetlist-script/codex/initial/dist/torn-targetlist.user.js
@@ -21,6 +21,7 @@
 (() => {
 'use strict';
 const TargetListCore = (() => {
+  const DEFAULT_MIN_RATIO = 0.1;
   const DEFAULT_MAX_RATIO = 0.6;
   const ESTIMATE_MAX_AGE = 7 * 24 * 60 * 60;
   const LIVE_STATUS_MAX_AGE = 30 * 1000;
@@ -50,9 +51,12 @@ const TargetListCore = (() => {
     return `${Math.floor(seconds / 86400)}d ago`;
   }
 
-  function assess(target, player, maxRatio = DEFAULT_MAX_RATIO, now = Date.now()) {
+  function assess(target, player, maxRatio = DEFAULT_MAX_RATIO, now = Date.now(), minRatio = DEFAULT_MIN_RATIO) {
     const ratio = positive(target.estimatedStats) && positive(player.battleStats.total)
       ? target.estimatedStats / player.battleStats.total : null;
+    const validRange = typeof minRatio === 'number' && Number.isFinite(minRatio) && minRatio >= 0 && minRatio <= 5 &&
+      typeof maxRatio === 'number' && Number.isFinite(maxRatio) && maxRatio >= 0.01 && maxRatio <= 5 && minRatio <= maxRatio;
+    const inRange = validRange && ratio !== null && ratio >= minRatio && ratio <= maxRatio;
     const stamp = target.estimateUpdatedAt;
     const fresh = positive(stamp) && stamp <= now / 1000 + 300 && now / 1000 - stamp <= ESTIMATE_MAX_AGE;
     const allied = target.id === player.id || (target.faction?.id && target.faction.id === player.faction.id);
@@ -67,14 +71,16 @@ const TargetListCore = (() => {
     if (allied) { label = 'Friendly / self'; tone = 'muted'; }
     else if (ratio === null) { label = 'Stats unknown'; tone = 'muted'; }
     else if (!fresh) { label = 'Estimate needs refresh'; tone = 'warn'; }
+    else if (!validRange) { label = 'Invalid stat range'; tone = 'warn'; }
+    else if (ratio < minRatio) { label = 'Below your minimum'; tone = 'warn'; }
     else if (ratio > maxRatio) { label = 'Above your limit'; tone = 'warn'; }
-    const suggested = !allied && ratio !== null && fresh && ratio <= maxRatio;
-    return { ratio, fresh, live, ready, timedUnavailable, suggested, label, tone };
+    const suggested = !allied && fresh && inRange;
+    return { ratio, inRange, fresh, live, ready, timedUnavailable, suggested, label, tone };
   }
 
   function select(targets, player, options, now = Date.now()) {
     const query = (options.query || '').trim().toLowerCase();
-    return targets.map(target => ({ target, assessment: assess(target, player, options.maxRatio, now) }))
+    return targets.map(target => ({ target, assessment: assess(target, player, options.maxRatio, now, options.minRatio) }))
       .filter(({ target, assessment }) => {
         if (options.mode === 'suggested' && !assessment.suggested) return false;
         return !query || `${target.id} ${target.name} ${target.faction?.name || ''} ${target.notes || ''}`.toLowerCase().includes(query);
@@ -83,11 +89,11 @@ const TargetListCore = (() => {
         (a.assessment.ratio ?? Infinity) - (b.assessment.ratio ?? Infinity) || a.target.id - b.target.id);
   }
 
-  return { DEFAULT_MAX_RATIO, ESTIMATE_MAX_AGE, LIVE_STATUS_MAX_AGE, serviceUrl, validKey, compact, ageLabel, assess, select };
+  return { DEFAULT_MIN_RATIO, DEFAULT_MAX_RATIO, ESTIMATE_MAX_AGE, LIVE_STATUS_MAX_AGE, serviceUrl, validKey, compact, ageLabel, assess, select };
 })();
 
 // Keep this service hostname and @connect in metadata.txt in sync when deploying elsewhere.
-const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.2' });
+const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.3' });
 
 const previousHost = document.getElementById('torn-targetlist-host');
 const mountedVersion = previousHost?.getAttribute('data-nwa-version') || '';
@@ -107,7 +113,10 @@ function mountTargetList() {
   const storageKey = `targetlist.session.${base}`;
   const preferencesKey = `targetlist.preferences.${base}`;
   const preferences = GM_getValue(preferencesKey, null);
-  const savedRatio = preferences?.maxRatio;
+  const savedMaxRatio = preferences?.maxRatio;
+  const maxRatio = Number.isFinite(savedMaxRatio) && savedMaxRatio >= 0.01 && savedMaxRatio <= 5 ? savedMaxRatio : C.DEFAULT_MAX_RATIO;
+  const savedMinRatio = preferences?.minRatio;
+  const minRatio = Number.isFinite(savedMinRatio) && savedMinRatio >= 0 && savedMinRatio <= maxRatio ? savedMinRatio : Math.min(C.DEFAULT_MIN_RATIO, maxRatio);
   const host = document.createElement('div');
   host.id = 'torn-targetlist-host';
   host.setAttribute('data-nwa-version', CONFIG.version);
@@ -118,7 +127,7 @@ function mountTargetList() {
     token: null, expiresAt: null, player: null, targets: [], warnings: [], generatedAt: null, poolLoadedAt: 0,
     authorizedPool: false, backgroundLoading: false, targetLoad: null, lastPoolAttemptAt: 0, backgroundRenderPending: false,
     busy: false, removingKey: false, open: false, generation: 0, error: '', query: '', mode: 'all',
-    maxRatio: Number.isFinite(savedRatio) && savedRatio >= 0.01 && savedRatio <= 5 ? savedRatio : C.DEFAULT_MAX_RATIO,
+    minRatio, maxRatio,
     lastTargetId: Number.isSafeInteger(preferences?.lastTargetId) ? preferences.lastTargetId : null,
     finding: false, findGeneration: 0, findAfterLogin: false,
     pendingChecks: new Set(), loading: false, targetGeneration: 0, view: 'targets',
@@ -160,7 +169,8 @@ function mountTargetList() {
     .profile{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.profile strong{font-size:17px}
     .statgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}.stat{background:#1c303a;padding:9px;border-radius:8px}
     .stat strong{display:block;color:#e4f5f3;font-size:15px}.toolbar{display:grid;grid-template-columns:1fr 160px;gap:10px;margin:14px 0}
-    .controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.controls input{width:74px;padding:5px 8px}.controls button{margin-left:auto}
+    .controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.controls label{display:flex;align-items:center;gap:5px}.controls input{width:74px;padding:5px 8px}.controls button{margin-left:auto}
+    .stat-range-summary{font-size:12px;color:#a8b9c2;margin-top:8px;overflow-wrap:anywhere}
     .count{margin:15px 0 10px;font-size:12px;color:#a8b9c2}.cards{display:grid;gap:10px}.card{border:1px solid #354956;border-radius:10px;padding:14px;background:#192b36}
     .cardhead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.name{font-weight:750;font-size:15px}.badge{font-size:10px;font-weight:750;padding:4px 7px;border-radius:5px;white-space:nowrap;background:#20473e;color:#a4efd9}
     .badge.warn{background:#4e3e26;color:#f6d290}.badge.muted{background:#2c3944;color:#bbcad4}
@@ -227,7 +237,8 @@ function mountTargetList() {
     launcher.setAttribute('aria-busy', String(state.finding));
   }
   function cancelFind() { state.findGeneration++; state.finding = false; findNotice(''); updateLauncher(); }
-  function savePreferences() { GM_setValue(preferencesKey, { maxRatio: state.maxRatio, lastTargetId: state.lastTargetId }); }
+  function savePreferences() { GM_setValue(preferencesKey, { minRatio: state.minRatio, maxRatio: state.maxRatio, lastTargetId: state.lastTargetId }); }
+  function assessTarget(target) { return C.assess(target, state.player, state.maxRatio, Date.now(), state.minRatio); }
   function saveSession() {
     GM_setValue(storageKey, { token: state.token, expiresAt: state.expiresAt });
   }
@@ -415,7 +426,7 @@ function mountTargetList() {
       for (let index = 0; index < limit; index++) {
         if (!current()) return;
         const target = candidates[index];
-        const cached = C.assess(target, state.player, state.maxRatio);
+        const cached = assessTarget(target);
         if (authorizedPoolFresh() && cached.suggested && cached.ready) {
           state.lastTargetId = target.id; savePreferences();
           findNotice(`Opening ${target.name || 'target'}…`);
@@ -437,7 +448,7 @@ function mountTargetList() {
         if (checked?.id !== target.id) throw new Error('NWA could not verify this target. Try again.');
         state.targets = state.targets.map(row => row.id === target.id ? { ...row, ...checked } : row);
         const latest = state.targets.find(row => row.id === target.id);
-        const assessment = latest && C.assess(latest, state.player, state.maxRatio);
+        const assessment = latest && assessTarget(latest);
         if (!assessment?.suggested || !assessment.ready) continue;
         state.lastTargetId = target.id; savePreferences();
         findNotice(`Opening ${latest.name || 'target'}…`);
@@ -445,7 +456,7 @@ function mountTargetList() {
         return;
       }
       const notice = !state.targets.length ? 'The NWA target pool is empty. Suggest targets in settings.'
-        : !matches.length ? 'No targets match your filters and stat limit. Adjust them in settings.'
+        : !matches.length ? 'No targets match your filters and stat range. Adjust them in settings.'
         : candidates.length > limit ? 'No available target in the first 5 matches. Try NWA again or browse settings.'
         : 'No matching targets are available right now. Try again shortly.';
       findNotice(notice);
@@ -600,16 +611,33 @@ function mountTargetList() {
     }
     mode.value = state.mode; mode.addEventListener('change', () => { state.mode = mode.value; renderCards(); });
     toolbar.append(query, mode); content.append(toolbar);
-    const controls = element('div', null, 'controls'); const ratioLabel = element('label', 'Target stats limit: ');
-    const ratio = element('input'); ratio.type = 'number'; ratio.min = '1'; ratio.max = '500'; ratio.step = '5'; ratio.value = String(Math.round(state.maxRatio * 100));
-    ratio.setAttribute('aria-label', 'Maximum target stats as percent of your total');
-    ratio.addEventListener('change', () => {
-      const value = Number(ratio.value);
-      state.maxRatio = Number.isFinite(value) && value >= 1 && value <= 500 ? value / 100 : C.DEFAULT_MAX_RATIO;
-      savePreferences(); cancelFind(); ratio.value = String(Math.round(state.maxRatio * 100)); renderCards();
-    });
-    ratioLabel.append(ratio, element('span', '% of yours')); controls.append(ratioLabel);
+    content.append(element('div', 'Target stats (% of yours)', 'notice'));
+    const controls = element('div', null, 'controls');
+    const rangeSummary = element('div', null, 'stat-range-summary');
+    const percent = value => String(Number((value * 100).toFixed(6)));
+    const updateRangeSummary = () => {
+      const total = state.player.battleStats.total;
+      rangeSummary.textContent = `Target range: ${C.compact(total * state.minRatio)}–${C.compact(total * state.maxRatio)} estimated stats (${percent(state.minRatio)}–${percent(state.maxRatio)}% of yours)`;
+    };
+    for (const [property, label, minimum] of [['minRatio', 'Min', 0], ['maxRatio', 'Max', 1]]) {
+      const ratioLabel = element('label', `${label}:`);
+      const ratio = element('input'); ratio.type = 'number'; ratio.min = String(minimum); ratio.max = '500'; ratio.step = 'any'; ratio.value = percent(state[property]);
+      ratio.setAttribute('aria-label', `${property === 'minRatio' ? 'Minimum' : 'Maximum'} target stats as percent of your total`);
+      ratio.addEventListener('change', () => {
+        const value = Number(ratio.value);
+        const next = value / 100;
+        if (!ratio.value.trim() || !Number.isFinite(value) || value < minimum || value > 500) {
+          ratio.value = percent(state[property]); message(`Enter ${minimum}–500% for the ${property === 'minRatio' ? 'minimum' : 'maximum'}.`); return;
+        }
+        if ((property === 'minRatio' && next > state.maxRatio) || (property === 'maxRatio' && next < state.minRatio)) {
+          ratio.value = percent(state[property]); message('Minimum stats must be at or below maximum stats.'); return;
+        }
+        state[property] = next; savePreferences(); cancelFind(); message(''); ratio.value = percent(next); updateRangeSummary(); renderCards();
+      });
+      ratioLabel.append(ratio, element('span', '%')); controls.append(ratioLabel);
+    }
     const refresh = button(state.loading ? 'Loading…' : 'Refresh list', () => void loadTargets()); refresh.disabled = state.loading; controls.append(refresh); content.append(controls);
+    updateRangeSummary(); content.append(rangeSummary);
     countNode = element('div', null, 'count'); cardContainer = element('div', null, 'cards'); content.append(countNode, cardContainer);
     const note = element('div', null, 'footnote');
     note.append(element('p', 'Possible matches use estimated total stats, with estimates no older than 7 days. This is a rough difficulty guide: stat distribution, equipment and bonuses also affect fights.'),
@@ -678,11 +706,11 @@ function mountTargetList() {
   function renderCards() {
     if (!state.player || !cardContainer) return;
     const rows = C.select(state.targets, state.player, state);
-    const suggestions = state.targets.filter(t => C.assess(t, state.player, state.maxRatio).suggested).length;
+    const suggestions = state.targets.filter(t => assessTarget(t).suggested).length;
     countNode.textContent = state.loading ? 'Loading the faction’s target pool…' : `${rows.length} shown · ${state.targets.length} in pool · ${suggestions} possible matches`;
     cardContainer.replaceChildren();
     if (!rows.length && !state.loading) {
-      const text = state.targets.length ? 'No targets match these filters. Try All targets or a different stat limit.' : 'The target pool is empty. New targets will appear after your faction’s list is updated.';
+      const text = state.targets.length ? 'No targets match these filters. Try All targets or a different stat range.' : 'The target pool is empty. New targets will appear after your faction’s list is updated.';
       cardContainer.append(element('div', text, 'empty')); return;
     }
     for (const { target, assessment } of rows) {
@@ -702,18 +730,19 @@ function mountTargetList() {
       const actions = element('div', null, 'actions');
       const check = button(state.pendingChecks.has(target.id) ? 'Checking…' : 'Check status', () => void checkStatus(target.id)); check.disabled = state.pendingChecks.has(target.id) || state.loading;
       actions.append(check);
-      if (assessment.ready && authorizedPoolFresh()) {
+      if (assessment.suggested && assessment.ready && authorizedPoolFresh()) {
         const attack = link('Attack ↗', `https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`, 'attack');
         const guardAttack = event => {
           const latest = state.targets.find(t => t.id === target.id);
-          if (!latest || !state.token || Date.parse(state.expiresAt) <= Date.now() || !authorizedPoolFresh() || !C.assess(latest, state.player, state.maxRatio).ready) {
-            event.preventDefault(); message('Check this target’s status again before opening an attack.'); renderCards();
+          const currentAssessment = latest && assessTarget(latest);
+          if (!latest || !state.token || Date.parse(state.expiresAt) <= Date.now() || !authorizedPoolFresh() || !currentAssessment.suggested || !currentAssessment.ready) {
+            event.preventDefault(); message('Check this target’s status and stat range before opening an attack.'); renderCards();
           }
         };
         attack.addEventListener('click', guardAttack);
         attack.addEventListener('auxclick', guardAttack);
         actions.append(attack);
-      } else actions.append(element('small', assessment.live ? target.status?.description || 'Unavailable right now' : 'Check availability to open attack'));
+      } else actions.append(element('small', !assessment.suggested ? assessment.label : assessment.live ? target.status?.description || 'Unavailable right now' : 'Check availability to open attack'));
       card.append(actions); cardContainer.append(card);
     }
   }
@@ -744,7 +773,7 @@ function mountTargetList() {
     else if (state.open && state.player && !state.pendingChecks.size) {
       let expired = false;
       state.targets = state.targets.map(target => {
-        if (target.checkedAt && !C.assess(target, state.player, state.maxRatio).live) {
+        if (target.checkedAt && !assessTarget(target).live) {
           expired = true; return { ...target, checkedAt: null };
         }
         return target;

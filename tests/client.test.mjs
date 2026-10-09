@@ -428,7 +428,7 @@ test('attack clicks revalidate live status expiry even before the next display r
   assert.equal(attack.emit('click').defaultPrevented, false);
   app.setNow(NOW + 30_000);
   assert.equal(attack.emit('click').defaultPrevented, true);
-  assert.match(app.text(), /Check this target’s status again/);
+  assert.match(app.text(), /Check this target’s status and stat range before opening an attack/);
   assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
 });
 
@@ -773,10 +773,10 @@ test('a mismatched explicit status response cannot mark another target available
 });
 
 test('background feed refreshes preserve focused search and unfinished stat-limit controls', async () => {
-  for (const control of ['search', 'limit']) {
+  for (const control of ['search', 'minimum', 'maximum']) {
     const app = fixture(); await app.signIn(); app.settings().emit('click');
     const focused = app.find(element => control === 'search' ? element.type === 'search'
-      : element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
+      : element.attributes.get('aria-label') === `${control === 'minimum' ? 'Minimum' : 'Maximum'} target stats as percent of your total`);
     focused.value = control === 'search' ? 'Target' : '4';
     if (control === 'search') focused.emit('input');
     app.root.activeElement = focused;
@@ -935,7 +935,70 @@ test('revocation during NWA selection stops further checks and clears the sessio
   assert.match(app.text(), /Faction access revoked/);
 });
 
-test('the stat limit persists separately from the session and is used by NWA after reloading', async () => {
+test('stat controls start with a ten-to-sixty-percent range and expose their supported bounds', async () => {
+  const app = fixture(); await app.signIn();
+  const minimum = app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total');
+  const maximum = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
+  assert.equal(minimum.value, '10'); assert.equal(maximum.value, '60');
+  assert.equal(minimum.min, '0'); assert.equal(minimum.max, '500');
+  assert.equal(maximum.min, '1'); assert.equal(maximum.max, '500');
+  assert.equal(app.find(element => element.className === 'stat-range-summary').textContent,
+    'Target range: 100K–600K estimated stats (10–60% of yours)');
+});
+
+test('saved legacy maximums are preserved and invalid minimums migrate to a compatible default', async () => {
+  const cases = [
+    [{ maxRatio: 0.4 }, 10, 40],
+    [{ maxRatio: 0.05 }, 5, 5],
+    [{ maxRatio: 0.03, minRatio: 0.1 }, 3, 3],
+    [{ maxRatio: 0.6, minRatio: 0 }, 0, 60],
+    [{ maxRatio: 0.6, minRatio: 0.6 }, 60, 60],
+    [{ maxRatio: 0.6, minRatio: 0.7 }, 10, 60],
+    [{ maxRatio: 0.6, minRatio: -0.1 }, 10, 60],
+    [{ maxRatio: 0.6, minRatio: '0.2' }, 10, 60],
+    [{ maxRatio: 0.6, minRatio: null }, 10, 60],
+    [{ maxRatio: 0.6, minRatio: NaN }, 10, 60],
+    [{ maxRatio: 0.6, minRatio: Infinity }, 10, 60],
+    [{ maxRatio: 0 }, 10, 60],
+    [{ maxRatio: 6 }, 10, 60],
+    [{ maxRatio: '0.4' }, 10, 60],
+  ];
+  for (const [preferences, expectedMinimum, expectedMaximum] of cases) {
+    const app = fixture(null, preferences); await app.signIn();
+    assert.equal(app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total').value,
+      String(expectedMinimum), JSON.stringify(preferences));
+    assert.equal(app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total').value,
+      String(expectedMaximum), JSON.stringify(preferences));
+  }
+});
+
+test('both stat limits persist separately from the session and filter instant NWA selection after reloading', async () => {
+  const app = fixture(); await app.signIn();
+  const minimum = app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total');
+  const maximum = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
+  maximum.value = '80'; maximum.emit('change');
+  minimum.value = '30'; minimum.emit('change');
+  assert.deepEqual(JSON.parse(JSON.stringify(app.storage.get(app.preferencesKey))), { minRatio: 0.3, maxRatio: 0.8, lastTargetId: null });
+  await app.signOut();
+  assert.equal(app.storage.has(app.storageKey), false);
+  assert.equal(app.storage.get(app.preferencesKey).minRatio, 0.3);
+  assert.equal(app.storage.get(app.preferencesKey).maxRatio, 0.8);
+  assert.equal(JSON.stringify([...app.storage.values()]).includes(KEY), false);
+  const reloaded = fixture(null, app.storage.get(app.preferencesKey));
+  await reloaded.signIn([
+    { ...target, id: 91001, estimatedStats: 200_000, checkedAt: new Date(NOW).toISOString() },
+    { ...target, checkedAt: new Date(NOW).toISOString() },
+    { ...target, id: 91003, estimatedStats: 900_000, checkedAt: new Date(NOW).toISOString() },
+  ]);
+  assert.equal(reloaded.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total').value, '30');
+  assert.equal(reloaded.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total').value, '80');
+  const before = reloaded.requests.length; reloaded.button('NWA').emit('click');
+  assert.equal(reloaded.requests.length, before, 'saved limits still use the immediate cached path');
+  assert.deepEqual(reloaded.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+  assert.deepEqual(JSON.parse(JSON.stringify(reloaded.storage.get(reloaded.preferencesKey))), { minRatio: 0.3, maxRatio: 0.8, lastTargetId: target.id });
+});
+
+test('the maximum stat limit is used by NWA after reloading', async () => {
   const app = fixture(); await app.signIn();
   const ratio = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
   ratio.value = '40'; ratio.emit('change');
@@ -954,13 +1017,181 @@ test('the stat limit persists separately from the session and is used by NWA aft
   assert.match(reloaded.find(element => element.className === 'quick-notice').textContent, /No targets match/);
 });
 
-test('changing the stat limit cancels a pending NWA selection before it can navigate', async () => {
-  const app = fixture(); await app.signIn(); app.button('NWA').emit('click'); const live = app.requests.at(-1);
-  const ratio = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
-  ratio.value = '40'; ratio.emit('change');
-  app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+test('NWA skips targets below the minimum and above the maximum on cached and live-check paths', async () => {
+  for (const cached of [true, false]) {
+    const app = fixture();
+    const checkedAt = cached ? new Date(NOW).toISOString() : undefined;
+    const match = { ...target, id: 92002, estimatedStats: 300_000, checkedAt };
+    await app.signIn([
+      { ...target, id: 92001, estimatedStats: 50_000, checkedAt },
+      { ...target, id: 92003, estimatedStats: 700_000, checkedAt },
+      match,
+    ]);
+    const before = app.requests.length; app.button('NWA').emit('click');
+    if (cached) assert.equal(app.requests.length, before, 'an in-range cached match is immediate');
+    else {
+      assert.equal(app.requests.length, before + 1, 'out-of-range candidates never consume a live lookup');
+      assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${match.id}/status`);
+      app.response(app.requests.at(-1), { id: match.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+    }
+    assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${match.id}`]);
+  }
+});
+
+test('NWA accepts targets exactly on either stat-range boundary', async () => {
+  for (const estimatedStats of [100_000, 600_000]) {
+    for (const cached of [true, false]) {
+      const app = fixture(); await app.signIn([{ ...target, estimatedStats, checkedAt: cached ? new Date(NOW).toISOString() : undefined }]);
+      const before = app.requests.length; app.button('NWA').emit('click');
+      if (!cached) {
+        assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${target.id}/status`);
+        app.response(app.requests.at(-1), { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+      }
+      assert.equal(app.requests.length, before + Number(!cached));
+      assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+    }
+  }
+});
+
+test('a pool containing only too-weak targets refreshes once and never checks or opens them', async () => {
+  const app = fixture(); const weak = { ...target, estimatedStats: 50_000, checkedAt: new Date(NOW).toISOString() };
+  await app.signIn([weak]);
+  const before = app.requests.length; app.button('NWA').emit('click'); await flush();
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets`);
+  app.response(app.requests.at(-1), { player, targets: [weak], warnings: [] }); await flush();
+  assert.equal(app.requests.length, before + 1);
   assert.deepEqual(app.navigations, []);
-  assert.equal(app.button('NWA').disabled, false);
+  assert.match(app.find(element => element.className === 'quick-notice').textContent, /No targets match/);
+});
+
+test('All targets labels weak players and reserves attack links for ready in-range matches', async () => {
+  const app = fixture(); const checkedAt = new Date(NOW).toISOString();
+  await app.signIn([
+    { ...target, id: 93001, estimatedStats: 50_000, checkedAt },
+    { ...target, id: 93002, estimatedStats: 700_000, checkedAt },
+    { ...target, id: 93003, estimatedStats: 400_000, checkedAt },
+  ]);
+  const cards = descendants(app.root).filter(element => element.className === 'card');
+  assert.equal(cards.length, 3);
+  const weakCard = cards.find(card => textContent(card).includes('[93001]'));
+  const strongCard = cards.find(card => textContent(card).includes('[93002]'));
+  const matchedCard = cards.find(card => textContent(card).includes('[93003]'));
+  assert.match(textContent(weakCard), /Below your minimum/);
+  assert.match(textContent(strongCard), /Above your limit/);
+  assert.equal(descendants(weakCard).some(element => element.className === 'attack'), false);
+  assert.equal(descendants(strongCard).some(element => element.className === 'attack'), false);
+  assert.equal(descendants(matchedCard).some(element => element.className === 'attack'), true);
+  const mode = app.find(element => element.tagName === 'SELECT'); mode.value = 'suggested'; mode.emit('change');
+  const suggestions = descendants(app.root).filter(element => element.className === 'card');
+  assert.equal(suggestions.length, 1);
+  assert.match(textContent(suggestions[0]), /\[93003\]/);
+});
+
+test('invalid, blank, and inverted stat edits restore the previous value without saving preferences', async () => {
+  const cases = [
+    ['Minimum', ['', ' ', '-1', '61', '501', 'invalid', 'Infinity']],
+    ['Maximum', ['', ' ', '0', '-1', '9', '501', 'invalid', 'Infinity']],
+  ];
+  for (const [name, values] of cases) {
+    for (const value of values) {
+      const app = fixture(); await app.signIn();
+      const control = app.find(element => element.attributes.get('aria-label') === `${name} target stats as percent of your total`);
+      const before = app.writes.length;
+      control.value = value; control.emit('change'); await flush();
+      assert.equal(control.value, name === 'Minimum' ? '10' : '60', `${name}: ${JSON.stringify(value)}`);
+      assert.equal(app.writes.length, before, `${name}: ${JSON.stringify(value)} must not persist an invalid range`);
+      assert.equal(app.storage.has(app.preferencesKey), false);
+      const error = app.find(element => element.className === 'error');
+      assert.equal(error.hidden, false);
+      assert.match(error.textContent, /minimum|maximum/i);
+    }
+  }
+});
+
+test('valid stat edits commit on change and allow equal limits and the zero-to-five-hundred bounds', async () => {
+  for (const [minimumValue, maximumValue, estimatedStats] of [[0, 1, 1], [60, 60, 600_000], [500, 500, 5_000_000]]) {
+    const app = fixture(); await app.signIn([{ ...target, estimatedStats, checkedAt: new Date(NOW).toISOString() }]);
+    const minimum = app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total');
+    const maximum = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
+    if (maximumValue < 10) { minimum.value = String(minimumValue); minimum.emit('change'); }
+    maximum.value = String(maximumValue); maximum.emit('change');
+    const beforeInput = app.writes.length;
+    minimum.value = String(minimumValue); minimum.emit('input');
+    assert.equal(app.writes.length, beforeInput, 'typing does not commit an unfinished number');
+    minimum.emit('change');
+    assert.equal(app.storage.get(app.preferencesKey).minRatio, minimumValue / 100);
+    assert.equal(app.storage.get(app.preferencesKey).maxRatio, maximumValue / 100);
+    const before = app.requests.length; app.button('NWA').emit('click');
+    assert.equal(app.requests.length, before);
+    assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+  }
+});
+
+test('changing either stat limit cancels a pending NWA selection before it can navigate', async () => {
+  for (const [name, value] of [['Minimum', '60'], ['Maximum', '40']]) {
+    const app = fixture(); await app.signIn(); app.button('NWA').emit('click'); const live = app.requests.at(-1);
+    const ratio = app.find(element => element.attributes.get('aria-label') === `${name} target stats as percent of your total`);
+    ratio.value = value; ratio.emit('change');
+    const before = app.requests.length;
+    app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+    assert.deepEqual(app.navigations, [], name);
+    assert.equal(app.requests.length, before, 'a canceled lookup does not continue selecting');
+    assert.equal(app.button('NWA').disabled, false);
+  }
+});
+
+test('decimal stat limits are retained exactly in the controls, saved preferences, and target range', async () => {
+  const app = fixture(); await app.signIn([{ ...target, estimatedStats: 202_500, checkedAt: new Date(NOW).toISOString() }]);
+  const minimum = app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total');
+  const maximum = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
+  minimum.value = '20.25'; minimum.emit('change');
+  maximum.value = '60.75'; maximum.emit('change');
+  assert.equal(minimum.value, '20.25'); assert.equal(maximum.value, '60.75');
+  assert.equal(app.storage.get(app.preferencesKey).minRatio, 0.2025);
+  assert.equal(app.storage.get(app.preferencesKey).maxRatio, 0.6075);
+  assert.match(app.find(element => element.className === 'stat-range-summary').textContent, /20\.25–60\.75% of yours/);
+  const before = app.requests.length; app.button('NWA').emit('click');
+  assert.equal(app.requests.length, before);
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+});
+
+test('changing either stat limit during a pending pool refresh cancels automatic selection', async () => {
+  for (const [name, value] of [['Minimum', '60'], ['Maximum', '40']]) {
+    const app = fixture(); await app.signIn(); app.setNow(NOW + 30_000);
+    app.button('NWA').emit('click'); const feed = app.requests.at(-1);
+    assert.equal(feed.url, `${serviceBase}/api/targets`);
+    const ratio = app.find(element => element.attributes.get('aria-label') === `${name} target stats as percent of your total`);
+    ratio.value = value; ratio.emit('change');
+    const before = app.requests.length;
+    app.response(feed, { player, targets: [{ ...target, checkedAt: new Date(NOW + 30_000).toISOString() }], warnings: [] }); await flush();
+    assert.deepEqual(app.navigations, [], name);
+    assert.equal(app.requests.length, before);
+    assert.equal(app.button('NWA').disabled, false);
+  }
+});
+
+test('a rejected stat edit leaves the valid saved range and pending target selection intact', async () => {
+  const app = fixture(); await app.signIn(); app.button('NWA').emit('click');
+  const live = app.requests.at(-1);
+  const minimum = app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total');
+  const before = app.writes.length;
+  minimum.value = '70'; minimum.emit('change');
+  assert.equal(minimum.value, '10'); assert.equal(app.writes.length, before);
+  app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+  assert.equal(app.storage.get(app.preferencesKey).minRatio, 0.1);
+  assert.equal(app.storage.get(app.preferencesKey).maxRatio, 0.6);
+});
+
+test('an existing attack link checks the current minimum again after settings exclude its target', async () => {
+  const app = fixture(); await app.signIn([{ ...target, checkedAt: new Date(NOW).toISOString() }]);
+  const attack = app.find(element => element.className === 'attack');
+  const minimum = app.find(element => element.attributes.get('aria-label') === 'Minimum target stats as percent of your total');
+  minimum.value = '60'; minimum.emit('change');
+  for (const type of ['click', 'auxclick']) assert.equal(attack.emit(type).defaultPrevented, true, type);
+  assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
+  assert.deepEqual(app.navigations, []);
 });
 
 function suggestion(overrides = {}) {

@@ -340,9 +340,12 @@ try {
   assert.match(await shadow(loginGuide, '#nwa-key-use', 'text'), /saved encrypted.*Supabase.*expires after up to 7 days.*while you are offline/s);
   assert.equal(await shadow(loginGuide, '.login button', 'text'), 'Sign in and save key');
   assert.equal(await loginGuide.evaluate(() => window.__mock.requests.length), 0);
-  await loginGuide.screenshot({ path: path.join(workspace, 'docs/images/nwa-login.png'), clip: loginClip });
+  await loginGuide.screenshot({ path: path.join(artifacts, 'browser-login-guide.png'), clip: loginClip });
+  if (process.env.TARGETLIST_UPDATE_DOC_IMAGES === '1') {
+    await loginGuide.screenshot({ path: path.join(workspace, 'docs/images/nwa-login.png'), clip: loginClip });
+  }
   await loginGuide.close();
-  console.log('PASS current documentation login screenshot uses the actual blank-key panel and NWA controls, clipped directly by the browser');
+  console.log('PASS blank-key login preview uses the actual panel and NWA controls; tracked documentation image changes only when explicitly requested');
 
   const legacyBackend = await mount();
   await legacyBackend.evaluate(() => {
@@ -408,8 +411,10 @@ try {
     mock.targets[1].estimatedStats = 10000;
     mock.targets[1].status = { state: 'Hospital', description: 'In hospital (cached mock)', until: Math.floor(Date.now() / 1000) + 600 };
     mock.targets[1].checkedAt = new Date(Date.now()).toISOString();
-    mock.targets[2].estimatedStats = 20000;
+    mock.targets[2].estimatedStats = 200000;
     mock.targets[2].estimateUpdatedAt = Math.floor(Date.now() / 1000) - 3600;
+    mock.targets.unshift({ ...structuredClone(mock.targets[0]), id: 105, name: 'TooWeak', estimatedStats: 25000,
+      notes: 'Freshly checked but below the configured minimum' });
     mock.holds.push('/api/targets');
   });
   assert.equal(await warm.evaluate(() => window.__mock.requests.length), 1, 'a saved token preloads the feed at mount');
@@ -417,9 +422,11 @@ try {
   assert.equal(await warm.evaluate(() => window.__mock.requests[0].data), undefined, 'restoration sends no API key');
   assert.equal(await warm.evaluate(() => window.__mock.requests[0].headers.Authorization), 'Bearer mock-session-token');
   await warm.evaluate(() => window.__mock.release('/api/targets'));
-  await wait(warm, () => window.__targetlistShadow.querySelectorAll('.card').length === 4);
+  await wait(warm, () => window.__targetlistShadow.querySelectorAll('.card').length === 5);
   assert.equal(warm.url(), 'about:blank', 'preloading never opens an attack by itself');
   assert.equal((await cardSnapshot(warm, 102)).attack, null, 'cached Hospital does not expose an attack link');
+  assert.match((await cardSnapshot(warm, 105)).text, /Below your minimum/);
+  assert.equal((await cardSnapshot(warm, 105)).attack, null, 'fresh checked targets below the minimum do not expose an attack link');
   let warmDestination;
   await warm.route(attackUrl, async route => {
     warmDestination = { url: route.request().url(), navigation: route.request().isNavigationRequest() };
@@ -439,7 +446,7 @@ try {
   assert.equal(warmDestination.navigation, true);
   assert.equal(await warm.locator('h1').textContent(), 'Cached destination only: no attack executed');
   await warm.close();
-  console.log('PASS saved-token startup preload, cached Hospital exclusion, ready-before-unknown selection, and warm NWA click with zero extra requests');
+  console.log('PASS saved-token startup preload, fresh below-minimum and cached Hospital exclusion, ready-before-unknown selection, and warm NWA click with zero extra requests');
 
   for (const expired of ['status', 'authorization']) {
     const stale = await mount(undefined, [source], context, expired => {
@@ -480,6 +487,88 @@ try {
     await stale.close();
   }
   console.log('PASS exact 30-second status and authorized-feed deadlines force verification before navigation');
+
+  const minimumSelector = '[aria-label="Minimum target stats as percent of your total"]';
+  const maximumSelector = '[aria-label="Maximum target stats as percent of your total"]';
+  async function rangeValues(page) {
+    return page.evaluate(({ minimumSelector, maximumSelector }) => ({
+      minimum: window.__targetlistShadow.querySelector(minimumSelector).value,
+      maximum: window.__targetlistShadow.querySelector(maximumSelector).value
+    }), { minimumSelector, maximumSelector });
+  }
+  const ranges = await mount(undefined, [source], context, () => {
+    const mock = window.__mock;
+    mock.targets[3].estimatedStats = 50000;
+    mock.targets[3].estimateUpdatedAt = Math.floor(Date.now() / 1000) - 3600;
+    for (const target of mock.targets) {
+      target.status = { state: 'Okay', description: 'Okay (cached mock)', until: null };
+      target.checkedAt = new Date(Date.now()).toISOString();
+    }
+  });
+  await login(ranges);
+  assert.deepEqual(await rangeValues(ranges), { minimum: '10', maximum: '60' });
+  assert.equal(await shadow(ranges, '.stat-range-summary', 'text'), 'Target range: 100K–600K estimated stats (10–60% of yours)');
+  assert.match((await cardSnapshot(ranges, 104)).text, /Below your minimum/);
+  assert.equal((await cardSnapshot(ranges, 104)).attack, null);
+  assert.equal((await cardSnapshot(ranges, 102)).attack, null, 'checked targets above the maximum do not expose attack links');
+  await shadow(ranges, 'select', 'select', 'suggested');
+  assert.equal(await ranges.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 1);
+  assert.match(await shadow(ranges, '.cards', 'text'), /Willow/);
+  await shadow(ranges, 'select', 'select', 'all');
+  assert.equal(await ranges.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 4, 'all targets retains out-of-range entries');
+  const rangeRequests = await ranges.evaluate(() => window.__mock.requests.length);
+  await shadow(ranges, maximumSelector, 'select', '80');
+  await shadow(ranges, minimumSelector, 'select', '20');
+  assert.deepEqual(await rangeValues(ranges), { minimum: '20', maximum: '80' });
+  assert.equal(await shadow(ranges, '.stat-range-summary', 'text'), 'Target range: 200K–800K estimated stats (20–80% of yours)');
+  await shadow(ranges, minimumSelector, 'select', '40');
+  assert.match((await cardSnapshot(ranges, 101)).text, /Below your minimum/);
+  assert.equal((await cardSnapshot(ranges, 101)).attack, null, 'raising the minimum removes a previously valid attack link');
+  for (const [selector, value] of [
+    [minimumSelector, '90'], [maximumSelector, '30'],
+    [minimumSelector, '-1'], [maximumSelector, '0'],
+    [minimumSelector, ''], [maximumSelector, '']
+  ]) {
+    await shadow(ranges, selector, 'select', value);
+    assert.deepEqual(await rangeValues(ranges), { minimum: '40', maximum: '80' }, `invalid range edit ${value} must restore both controls`);
+    assert.equal(await ranges.evaluate(() => window.__targetlistShadow.querySelector('.error').hidden), false);
+  }
+  await shadow(ranges, minimumSelector, 'select', '20');
+  assert.equal(await ranges.evaluate(() => window.__targetlistShadow.querySelector('.error').hidden), true);
+  assert.equal(await ranges.evaluate(() => window.__mock.requests.length), rangeRequests, 'stat controls filter the loaded feed without extra requests');
+  const savedRange = await ranges.evaluate(() => structuredClone(window.__mock.store.get(`targetlist.preferences.${window.__mock.serviceOrigin}`)));
+  assert.equal(savedRange.minRatio, 0.2);
+  assert.equal(savedRange.maxRatio, 0.8);
+  await ranges.screenshot({ path: path.join(artifacts, 'browser-stat-range-desktop.png'), fullPage: true });
+  for (const width of [390, 320]) {
+    await ranges.setViewportSize({ width, height: 844 });
+    const geometry = await ranges.evaluate(() => {
+      const root = window.__targetlistShadow;
+      const panel = root.querySelector('.panel').getBoundingClientRect();
+      const scroll = root.querySelector('.scroll');
+      const inputs = [...root.querySelectorAll('.controls input')].map(input => {
+        const rect = input.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, width: rect.width };
+      });
+      return { left: panel.left, right: panel.right, width: innerWidth,
+        documentWidth: document.documentElement.scrollWidth, scrollWidth: scroll.scrollWidth,
+        clientWidth: scroll.clientWidth, inputs };
+    });
+    assert(geometry.left >= 0 && geometry.right <= geometry.width, JSON.stringify(geometry));
+    assert(geometry.documentWidth <= geometry.width && geometry.scrollWidth <= geometry.clientWidth + 1, JSON.stringify(geometry));
+    assert.equal(geometry.inputs.length, 2);
+    for (const input of geometry.inputs) assert(input.left >= geometry.left && input.right <= geometry.right && input.width >= 40, JSON.stringify(geometry));
+    await ranges.screenshot({ path: path.join(artifacts, `browser-stat-range-mobile-${width}.png`), fullPage: true });
+  }
+  await ranges.close();
+  const restoredRange = await mount(undefined, [source], context, preferences => {
+    window.__mock.store.set(`targetlist.preferences.${window.__mock.serviceOrigin}`, preferences);
+  }, savedRange);
+  await login(restoredRange);
+  assert.deepEqual(await rangeValues(restoredRange), { minimum: '20', maximum: '80' });
+  assert.equal(await shadow(restoredRange, '.stat-range-summary', 'text'), 'Target range: 200K–800K estimated stats (20–80% of yours)');
+  await restoredRange.close();
+  console.log('PASS 10–60% default range, weak-target labels and attack exclusion, immediate filter updates, invalid/inverted edit rejection, saved settings, and 390/320px layout');
 
   const main = await mount();
   await login(main);
@@ -532,7 +621,7 @@ try {
 
   await main.evaluate(() => { window.__mockNow += 30000; window.__targetlistShadow.querySelector('a.attack').click(); });
   assert.equal(await main.evaluate(() => window.__targetlistShadow.querySelectorAll('a.attack').length), 0);
-  assert.match(await shadow(main, '.error', 'text'), /Check this target.*again/);
+  assert.match(await shadow(main, '.error', 'text'), /Check this target.*status and stat range before opening an attack/);
   await main.close();
   console.log('PASS stale status cannot open an attack');
 
@@ -756,6 +845,7 @@ try {
   console.log(`Mock screenshots: ${path.join(artifacts, 'browser-desktop.png')} and ${path.join(artifacts, 'browser-mobile.png')}`);
   console.log(`Mock NWA launcher screenshots: ${path.join(artifacts, 'browser-nwa-launcher-desktop.png')} and ${path.join(artifacts, 'browser-nwa-launcher-mobile.png')}`);
   console.log(`Mock encrypted-key login screenshot: ${path.join(artifacts, 'browser-login-mobile.png')}`);
+  console.log(`Mock stat-range screenshots: ${path.join(artifacts, 'browser-stat-range-desktop.png')}, ${path.join(artifacts, 'browser-stat-range-mobile-390.png')} and ${path.join(artifacts, 'browser-stat-range-mobile-320.png')}`);
   console.log(`Mock suggestion screenshots: ${path.join(artifacts, 'browser-suggestions-desktop.png')} and ${path.join(artifacts, 'browser-suggestions-mobile.png')}`);
 } finally {
   await context.close();

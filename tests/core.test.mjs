@@ -43,6 +43,72 @@ test('recommendations apply the chosen ratio and include its exact boundary', ()
   assert.equal(Core.assess(target(), player, undefined, NOW).suggested, true);
 });
 
+test('the default minimum excludes weak targets and includes both range boundaries', () => {
+  assert.equal(Core.DEFAULT_MIN_RATIO, 0.1);
+  assert.equal(Core.DEFAULT_MAX_RATIO, 0.6);
+  for (const estimatedStats of [100_000, 600_000]) {
+    const assessment = Core.assess(target({ estimatedStats }), player, undefined, NOW);
+    assert.equal(assessment.inRange, true);
+    assert.equal(assessment.suggested, true);
+    assert.equal(assessment.label, 'Possible match');
+  }
+  const weak = Core.assess(target({ estimatedStats: 99_999 }), player, undefined, NOW);
+  assert.equal(weak.inRange, false);
+  assert.equal(weak.suggested, false);
+  assert.equal(weak.label, 'Below your minimum');
+  assert.equal(weak.ready, true, 'Ready describes live availability independently of stat eligibility');
+  assert.equal(weak.tone, 'warn');
+});
+
+test('a zero minimum disables the lower bound without accepting unknown stats', () => {
+  const weak = Core.assess(target({ estimatedStats: 1 }), player, 0.6, NOW, 0);
+  assert.equal(weak.inRange, true);
+  assert.equal(weak.suggested, true);
+  assert.equal(weak.label, 'Possible match');
+  for (const estimatedStats of [0, null, undefined]) {
+    const assessment = Core.assess(target({ estimatedStats }), player, 0.6, NOW, 0);
+    assert.equal(assessment.inRange, false);
+    assert.equal(assessment.suggested, false);
+  }
+});
+
+test('suggested selection applies custom minimum and maximum inclusively', () => {
+  const targets = [
+    target({ id: 1, estimatedStats: 299_999 }),
+    target({ id: 2, estimatedStats: 300_000 }),
+    target({ id: 3, estimatedStats: 500_000 }),
+    target({ id: 4, estimatedStats: 500_001 }),
+    target({ id: 5, estimatedStats: 400_000, estimateUpdatedAt: 1 }),
+    target({ id: player.id, estimatedStats: 400_000 }),
+  ];
+  const options = { mode: 'suggested', minRatio: 0.3, maxRatio: 0.5 };
+  assert.deepEqual([...Core.select(targets, player, options, NOW).map(item => item.target.id)], [2, 3]);
+  assert.equal(Core.select(targets, player, { ...options, mode: 'all' }, NOW).length, targets.length);
+  assert.equal(Core.select(targets, player, { ...options, minRatio: 0.5 }, NOW)[0].target.id, 3);
+});
+
+test('invalid or inverted stat bounds fail closed for suggestions', () => {
+  const ranges = [
+    { minRatio: -0.01, maxRatio: 0.6 },
+    { minRatio: 5.01, maxRatio: 5 },
+    { minRatio: 0.7, maxRatio: 0.6 },
+    { minRatio: 0, maxRatio: 0.009 },
+    { minRatio: 0, maxRatio: 5.01 },
+    ...[null, '0.1', NaN, Infinity, -Infinity].map(minRatio => ({ minRatio, maxRatio: 0.6 })),
+    ...[null, '0.6', NaN, Infinity, -Infinity].map(maxRatio => ({ minRatio: 0.1, maxRatio })),
+  ];
+  for (const { minRatio, maxRatio } of ranges) {
+    const assessment = Core.assess(target(), player, maxRatio, NOW, minRatio);
+    assert.equal(assessment.inRange, false, `${String(minRatio)} to ${String(maxRatio)}`);
+    assert.equal(assessment.suggested, false);
+    assert.equal(assessment.label, 'Invalid stat range');
+    assert.equal(assessment.ready, true, 'invalid limits do not change availability');
+    assert.equal(Core.select([target()], player, { mode: 'suggested', minRatio, maxRatio }, NOW).length, 0);
+  }
+  assert.equal(Core.assess(target({ estimatedStats: 10_000 }), player, 0.01, NOW, 0).suggested, true);
+  assert.equal(Core.assess(target({ estimatedStats: 5_000_000 }), player, 5, NOW, 5).suggested, true);
+});
+
 test('missing, zero, negative, nonnumeric, and nonfinite estimates remain unknown', () => {
   for (const value of [undefined, null, 0, -1, '500000', NaN, Infinity, -Infinity]) {
     const assessment = Core.assess(target({ estimatedStats: value }), player, 0.6, NOW);

@@ -1,4 +1,5 @@
 const TargetListCore = (() => {
+  const DEFAULT_MIN_RATIO = 0.1;
   const DEFAULT_MAX_RATIO = 0.6;
   const ESTIMATE_MAX_AGE = 7 * 24 * 60 * 60;
   const LIVE_STATUS_MAX_AGE = 30 * 1000;
@@ -28,9 +29,12 @@ const TargetListCore = (() => {
     return `${Math.floor(seconds / 86400)}d ago`;
   }
 
-  function assess(target, player, maxRatio = DEFAULT_MAX_RATIO, now = Date.now()) {
+  function assess(target, player, maxRatio = DEFAULT_MAX_RATIO, now = Date.now(), minRatio = DEFAULT_MIN_RATIO) {
     const ratio = positive(target.estimatedStats) && positive(player.battleStats.total)
       ? target.estimatedStats / player.battleStats.total : null;
+    const validRange = typeof minRatio === 'number' && Number.isFinite(minRatio) && minRatio >= 0 && minRatio <= 5 &&
+      typeof maxRatio === 'number' && Number.isFinite(maxRatio) && maxRatio >= 0.01 && maxRatio <= 5 && minRatio <= maxRatio;
+    const inRange = validRange && ratio !== null && ratio >= minRatio && ratio <= maxRatio;
     const stamp = target.estimateUpdatedAt;
     const fresh = positive(stamp) && stamp <= now / 1000 + 300 && now / 1000 - stamp <= ESTIMATE_MAX_AGE;
     const allied = target.id === player.id || (target.faction?.id && target.faction.id === player.faction.id);
@@ -45,14 +49,16 @@ const TargetListCore = (() => {
     if (allied) { label = 'Friendly / self'; tone = 'muted'; }
     else if (ratio === null) { label = 'Stats unknown'; tone = 'muted'; }
     else if (!fresh) { label = 'Estimate needs refresh'; tone = 'warn'; }
+    else if (!validRange) { label = 'Invalid stat range'; tone = 'warn'; }
+    else if (ratio < minRatio) { label = 'Below your minimum'; tone = 'warn'; }
     else if (ratio > maxRatio) { label = 'Above your limit'; tone = 'warn'; }
-    const suggested = !allied && ratio !== null && fresh && ratio <= maxRatio;
-    return { ratio, fresh, live, ready, timedUnavailable, suggested, label, tone };
+    const suggested = !allied && fresh && inRange;
+    return { ratio, inRange, fresh, live, ready, timedUnavailable, suggested, label, tone };
   }
 
   function select(targets, player, options, now = Date.now()) {
     const query = (options.query || '').trim().toLowerCase();
-    return targets.map(target => ({ target, assessment: assess(target, player, options.maxRatio, now) }))
+    return targets.map(target => ({ target, assessment: assess(target, player, options.maxRatio, now, options.minRatio) }))
       .filter(({ target, assessment }) => {
         if (options.mode === 'suggested' && !assessment.suggested) return false;
         return !query || `${target.id} ${target.name} ${target.faction?.name || ''} ${target.notes || ''}`.toLowerCase().includes(query);
@@ -61,5 +67,5 @@ const TargetListCore = (() => {
         (a.assessment.ratio ?? Infinity) - (b.assessment.ratio ?? Infinity) || a.target.id - b.target.id);
   }
 
-  return { DEFAULT_MAX_RATIO, ESTIMATE_MAX_AGE, LIVE_STATUS_MAX_AGE, serviceUrl, validKey, compact, ageLabel, assess, select };
+  return { DEFAULT_MIN_RATIO, DEFAULT_MAX_RATIO, ESTIMATE_MAX_AGE, LIVE_STATUS_MAX_AGE, serviceUrl, validKey, compact, ageLabel, assess, select };
 })();
