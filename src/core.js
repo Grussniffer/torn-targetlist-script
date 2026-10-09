@@ -1,7 +1,7 @@
 const TargetListCore = (() => {
   const DEFAULT_MAX_RATIO = 0.6;
   const ESTIMATE_MAX_AGE = 7 * 24 * 60 * 60;
-  const LIVE_STATUS_MAX_AGE = 60 * 1000;
+  const LIVE_STATUS_MAX_AGE = 30 * 1000;
 
   function serviceUrl(value) {
     const url = new URL(value);
@@ -36,7 +36,10 @@ const TargetListCore = (() => {
     const allied = target.id === player.id || (target.faction?.id && target.faction.id === player.faction.id);
     const checked = Date.parse(target.checkedAt);
     const live = Number.isFinite(checked) && checked <= now + 5000 && now - checked < LIVE_STATUS_MAX_AGE;
-    const ready = live && target.status?.state === 'Okay' && !allied;
+    const until = target.status?.until;
+    const validUntil = until == null || (typeof until === 'number' && Number.isSafeInteger(until) && until >= 0);
+    const timedUnavailable = validUntil && typeof until === 'number' && until > now / 1000;
+    const ready = live && target.status?.state === 'Okay' && validUntil && !timedUnavailable && !allied;
     let label = 'Possible match';
     let tone = 'good';
     if (allied) { label = 'Friendly / self'; tone = 'muted'; }
@@ -44,7 +47,7 @@ const TargetListCore = (() => {
     else if (!fresh) { label = 'Estimate needs refresh'; tone = 'warn'; }
     else if (ratio > maxRatio) { label = 'Above your limit'; tone = 'warn'; }
     const suggested = !allied && ratio !== null && fresh && ratio <= maxRatio;
-    return { ratio, fresh, live, ready, suggested, label, tone };
+    return { ratio, fresh, live, ready, timedUnavailable, suggested, label, tone };
   }
 
   function select(targets, player, options, now = Date.now()) {

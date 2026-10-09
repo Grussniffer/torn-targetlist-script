@@ -1,5 +1,5 @@
 // Keep this service hostname and @connect in metadata.txt in sync when deploying elsewhere.
-const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.3.2' });
+const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.0' });
 
 const previousHost = document.getElementById('torn-targetlist-host');
 const mountedVersion = previousHost?.getAttribute('data-nwa-version') || '';
@@ -12,6 +12,7 @@ if (!previousHost || !/^\d+\.\d+\.\d+$/.test(mountedVersion)
 
 function mountTargetList() {
   const C = TargetListCore;
+  const FEED_REFRESH_MS = 10_000;
   let base;
   try { base = C.serviceUrl(CONFIG.serviceUrl); }
   catch (error) { console.error('[NWA] Invalid service address:', error.message); return; }
@@ -27,6 +28,7 @@ function mountTargetList() {
   const root = host.attachShadow({ mode: 'closed' });
   const state = {
     token: null, expiresAt: null, player: null, targets: [], warnings: [], generatedAt: null, poolLoadedAt: 0,
+    authorizedPool: false, backgroundLoading: false, targetLoad: null, lastPoolAttemptAt: 0, backgroundRenderPending: false,
     busy: false, open: false, generation: 0, error: '', query: '', mode: 'all',
     maxRatio: Number.isFinite(savedRatio) && savedRatio >= 0.01 && savedRatio <= 5 ? savedRatio : C.DEFAULT_MAX_RATIO,
     lastTargetId: Number.isSafeInteger(preferences?.lastTargetId) ? preferences.lastTargetId : null,
@@ -133,7 +135,7 @@ function mountTargetList() {
   function message(text) { state.error = text; errorBox.textContent = text; errorBox.hidden = !text; }
   function findNotice(text) { quickNotice.textContent = text; quickNotice.hidden = !text; }
   function updateLauncher() {
-    launcher.disabled = state.finding || state.busy || state.loading;
+    launcher.disabled = state.finding || state.busy;
     launcher.setAttribute('aria-busy', String(state.finding));
   }
   function cancelFind() { state.findGeneration++; state.finding = false; findNotice(''); updateLauncher(); }
@@ -144,6 +146,8 @@ function mountTargetList() {
   function clearSession() {
     cancelFind(); state.findAfterLogin = false;
     state.generation++; state.token = null; state.player = null; state.targets = []; state.warnings = []; state.poolLoadedAt = 0;
+    state.authorizedPool = false; state.backgroundLoading = false; state.targetLoad = null; state.lastPoolAttemptAt = 0;
+    state.backgroundRenderPending = false;
     state.pendingChecks.clear(); state.busy = false; state.loading = false; state.targetGeneration++; state.expiresAt = null;
     state.view = 'targets'; state.suggestionView = 'pending'; state.suggestions = []; state.nextSuggestionOffset = null;
     state.canReview = false; state.suggestionsLoading = false; state.suggestionGeneration++;
@@ -217,25 +221,56 @@ function mountTargetList() {
     const token = state.token; clearSession(); message(''); render();
     if (token) { try { await request('DELETE', '/api/session', undefined, token); } catch { /* Local credentials are cleared regardless. */ } }
   }
-  async function loadTargets(force = false, forFind = false) {
-    if (!state.token || (state.loading && !force)) return false;
-    if (!forFind) cancelFind();
+  function authorizedPoolFresh() {
+    const age = Date.now() - state.poolLoadedAt;
+    return state.authorizedPool && age >= 0 && age < C.LIVE_STATUS_MAX_AGE;
+  }
+  function pageVisible() { return document.visibilityState !== 'hidden'; }
+  function editingControl() { return ['INPUT', 'TEXTAREA', 'SELECT'].includes(root.activeElement?.tagName); }
+  function renderBackgroundUpdate() {
+    state.backgroundRenderPending = true;
+    if (!state.open) return;
+    if (editingControl()) {
+      // Keep the focused input and its unfinished text intact while availability changes.
+      if (state.view === 'targets') renderCards();
+      return;
+    }
+    render();
+  }
+  function loadTargets(force = false, forFind = false, background = false) {
+    if (!state.token || (background && (state.finding || state.pendingChecks.size))) return Promise.resolve(false);
+    if (!forFind && !background) cancelFind();
+    if (state.targetLoad && !force) return state.targetLoad.promise;
     const generation = state.generation;
     const targetGeneration = ++state.targetGeneration;
-    state.loading = true; message('');
-    // Clear previously checked statuses while refreshed authorization is pending.
-    state.targets = []; render();
-    try {
-      const data = await request('GET', '/api/targets');
-      if (generation !== state.generation || targetGeneration !== state.targetGeneration) return;
-      state.player = data.player; state.targets = data.targets; state.warnings = data.warnings || []; state.generatedAt = data.generatedAt;
-      state.poolLoadedAt = Date.now();
-      return true;
-    } catch (error) { if (generation === state.generation && targetGeneration === state.targetGeneration) handleError(error); }
-    finally { if (generation === state.generation && targetGeneration === state.targetGeneration) { state.loading = false; render(); } }
+    state.loading = !background; state.backgroundLoading = background; state.lastPoolAttemptAt = Date.now(); message('');
+    // Background sync publishes a complete new pool without hiding usable cached targets.
+    if (!background) { state.targets = []; state.authorizedPool = false; }
+    if (!background) render();
+    const pending = (async () => {
+      try {
+        const data = await request('GET', '/api/targets');
+        if (generation !== state.generation || targetGeneration !== state.targetGeneration) return false;
+        state.player = data.player; state.targets = data.targets; state.warnings = data.warnings || []; state.generatedAt = data.generatedAt;
+        state.poolLoadedAt = Date.now(); state.authorizedPool = true;
+        return true;
+      } catch (error) {
+        if (generation === state.generation && targetGeneration === state.targetGeneration) {
+          state.authorizedPool = false; handleError(error);
+        }
+        return false;
+      } finally {
+        if (generation === state.generation && targetGeneration === state.targetGeneration) {
+          state.loading = false; state.backgroundLoading = false; state.targetLoad = null;
+          if (background) renderBackgroundUpdate(); else render();
+        }
+      }
+    })();
+    state.targetLoad = { promise: pending };
+    return pending;
   }
   async function findTarget() {
-    if (state.finding || state.busy || state.loading) return;
+    if (state.finding || state.busy) return;
     message('');
     if (!state.token || Date.parse(state.expiresAt) <= Date.now()) {
       if (state.token) clearSession();
@@ -248,7 +283,7 @@ function mountTargetList() {
     const current = () => state.finding && findGeneration === state.findGeneration && generation === state.generation
       && targetGeneration === state.targetGeneration && state.token && Date.parse(state.expiresAt) > Date.now();
     try {
-      if (!state.player || Date.now() - state.poolLoadedAt >= 30000
+      if (!state.player || !authorizedPoolFresh()
           || !C.select(state.targets, state.player, { ...state, mode: 'suggested' }).length) {
         const restored = await loadTargets(false, true);
         targetGeneration = state.targetGeneration;
@@ -258,12 +293,21 @@ function mountTargetList() {
         }
       }
       const matches = C.select(state.targets, state.player, { ...state, mode: 'suggested' });
-      const candidates = matches.filter(row => !row.assessment.live || row.assessment.ready)
-        .map(row => row.target).sort((a, b) => Number(a.id === state.lastTargetId) - Number(b.id === state.lastTargetId));
+      const candidates = matches.filter(row => (!row.assessment.live || row.assessment.ready) && !row.assessment.timedUnavailable)
+        .sort((a, b) => Number(b.assessment.ready) - Number(a.assessment.ready)
+          || Number(a.target.id === state.lastTargetId) - Number(b.target.id === state.lastTargetId))
+        .map(row => row.target);
       const limit = Math.min(candidates.length, 5);
       for (let index = 0; index < limit; index++) {
         if (!current()) return;
         const target = candidates[index];
+        const cached = C.assess(target, state.player, state.maxRatio);
+        if (authorizedPoolFresh() && cached.suggested && cached.ready) {
+          state.lastTargetId = target.id; savePreferences();
+          findNotice(`Opening ${target.name || 'target'}…`);
+          window.location.assign(`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`);
+          return;
+        }
         findNotice(`Checking ${target.name || 'player'}…`);
         let checked;
         try { checked = await request('GET', `/api/targets/${target.id}/status`); }
@@ -307,12 +351,14 @@ function mountTargetList() {
     if (state.pendingChecks.has(id)) return;
     state.pendingChecks.add(id); message(''); renderCards();
     const generation = state.generation;
+    const targetGeneration = state.targetGeneration;
     try {
       const checked = await request('GET', `/api/targets/${id}/status`);
-      if (generation !== state.generation) return;
+      if (generation !== state.generation || targetGeneration !== state.targetGeneration) return;
+      if (checked?.id !== id) throw new Error('NWA could not verify this target. Try again.');
       state.targets = state.targets.map(target => target.id === id ? { ...target, ...checked } : target);
     } catch (error) {
-      if (generation !== state.generation) return;
+      if (generation !== state.generation || targetGeneration !== state.targetGeneration) return;
       state.targets = state.targets.map(target => target.id === id ? { ...target, checkedAt: null } : target);
       handleError(error);
     } finally {
@@ -388,6 +434,7 @@ function mountTargetList() {
 
   let cardContainer, countNode;
   function render() {
+    state.backgroundRenderPending = false;
     updateLauncher();
     content.replaceChildren(); cardContainer = null; countNode = null;
     if (!state.player) {
@@ -401,6 +448,7 @@ function mountTargetList() {
       form.addEventListener('submit', event => { event.preventDefault(); const key = input.value.trim(); input.value = ''; void login(key); });
       const privacy = element('div', null, 'notice');
       privacy.append(element('div', `Your key is sent to ${new URL(base).host} and Torn for login, and kept only for this session.`),
+        element('div', 'While NWA is recently active, your key also helps refresh target availability. It stays in backend memory; signing out stops its use.'),
         link('Get a Limited API key ↗', 'https://www.torn.com/preferences.php#tab=api'));
       form.append(label, submit, privacy); content.append(intro, form); return;
     }
@@ -447,7 +495,7 @@ function mountTargetList() {
     countNode = element('div', null, 'count'); cardContainer = element('div', null, 'cards'); content.append(countNode, cardContainer);
     const note = element('div', null, 'footnote');
     note.append(element('p', 'Possible matches use estimated total stats, with estimates no older than 7 days. This is a rough difficulty guide: stat distribution, equipment and bonuses also affect fights.'),
-      element('p', 'Check status before attacking. The attack button lasts 60 seconds after a successful check. Status can change at any time; Torn makes the final availability check.'));
+      element('p', 'NWA uses availability checked within 30 seconds. Check status to update a target now. Status can change at any time; Torn makes the final availability check.'));
     for (const warning of state.warnings) note.append(element('p', warning));
     if (state.generatedAt) note.append(element('div', `Pool updated: ${new Date(state.generatedAt).toLocaleString()}`));
     content.append(note); renderCards();
@@ -536,11 +584,11 @@ function mountTargetList() {
       const actions = element('div', null, 'actions');
       const check = button(state.pendingChecks.has(target.id) ? 'Checking…' : 'Check status', () => void checkStatus(target.id)); check.disabled = state.pendingChecks.has(target.id) || state.loading;
       actions.append(check);
-      if (assessment.ready) {
+      if (assessment.ready && authorizedPoolFresh()) {
         const attack = link('Attack ↗', `https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`, 'attack');
         const guardAttack = event => {
           const latest = state.targets.find(t => t.id === target.id);
-          if (!latest || !state.token || Date.parse(state.expiresAt) <= Date.now() || !C.assess(latest, state.player, state.maxRatio).ready) {
+          if (!latest || !state.token || Date.parse(state.expiresAt) <= Date.now() || !authorizedPoolFresh() || !C.assess(latest, state.player, state.maxRatio).ready) {
             event.preventDefault(); message('Check this target’s status again before opening an attack.'); renderCards();
           }
         };
@@ -554,7 +602,7 @@ function mountTargetList() {
 
   function toggle(open) {
     state.open = open; panel.hidden = !open; settings.setAttribute('aria-expanded', String(open));
-    if (open) findNotice('');
+    if (open) { findNotice(''); render(); }
     if (open && state.token && !state.player && !state.finding) void loadTargets();
   }
   const saved = GM_getValue(storageKey, null);
@@ -562,6 +610,16 @@ function mountTargetList() {
     state.token = saved.token; state.expiresAt = saved.expiresAt;
   } else GM_deleteValue(storageKey);
   root.addEventListener('keydown', event => { if (event.key === 'Escape') toggle(false); });
+  root.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (state.backgroundRenderPending && state.open && !editingControl()) render();
+    }, 0);
+  });
+  document.addEventListener?.('visibilitychange', () => {
+    if (pageVisible() && state.token && Date.parse(state.expiresAt) > Date.now() && !state.busy) {
+      void loadTargets(false, false, Boolean(state.player));
+    }
+  });
   // Expire the session and checked attack links even while the panel is idle.
   setInterval(() => {
     if (state.token && Date.parse(state.expiresAt) <= Date.now()) { clearSession(); message('Session expired. Sign in again.'); render(); }
@@ -575,6 +633,11 @@ function mountTargetList() {
       });
       if (expired) renderCards();
     }
+    if (state.token && pageVisible() && !state.busy && !state.finding && !state.pendingChecks.size && !state.loading && !state.backgroundLoading
+        && Date.now() - state.lastPoolAttemptAt >= FEED_REFRESH_MS) {
+      void loadTargets(false, false, Boolean(state.player));
+    }
   }, 5000);
   render();
+  if (state.token && pageVisible()) void loadTargets();
 }

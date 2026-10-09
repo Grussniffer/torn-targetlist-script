@@ -37,7 +37,7 @@ let networkRequests = 0;
 await context.route('**/*', route => { networkRequests++; return route.abort(); });
 const pageErrors = [];
 
-async function mount(viewport = { width: 1280, height: 960 }, scripts = [source], pageContext = context) {
+async function mount(viewport = { width: 1280, height: 960 }, scripts = [source], pageContext = context, beforeMount = null, beforeMountArgument = undefined) {
   const page = await pageContext.newPage();
   await page.setViewportSize(viewport);
   page.on('pageerror', error => pageErrors.push(error.message));
@@ -138,6 +138,7 @@ async function mount(viewport = { width: 1280, height: 960 }, scripts = [source]
       for (const request of pending) respond(request);
     };
   });
+  if (beforeMount) await page.evaluate(beforeMount, beforeMountArgument);
   for (const script of scripts) await page.addScriptTag({ content: script });
   return page;
 }
@@ -333,6 +334,89 @@ try {
   await quick.close();
   console.log('PASS NWA waits for a live status check then opens the same-tab attack page, fulfilled entirely by a local mock');
 
+  const warm = await mount(undefined, [source], context, () => {
+    const mock = window.__mock;
+    mock.store.set(`targetlist.session.${mock.serviceOrigin}`, {
+      token: 'mock-session-token', expiresAt: new Date(Date.now() + 7 * 86400000).toISOString()
+    });
+    mock.targets[0].status = { state: 'Okay', description: 'Okay (cached mock)', until: null };
+    mock.targets[0].checkedAt = new Date(Date.now()).toISOString();
+    mock.targets[1].estimatedStats = 10000;
+    mock.targets[1].status = { state: 'Hospital', description: 'In hospital (cached mock)', until: Math.floor(Date.now() / 1000) + 600 };
+    mock.targets[1].checkedAt = new Date(Date.now()).toISOString();
+    mock.targets[2].estimatedStats = 20000;
+    mock.targets[2].estimateUpdatedAt = Math.floor(Date.now() / 1000) - 3600;
+    mock.holds.push('/api/targets');
+  });
+  assert.equal(await warm.evaluate(() => window.__mock.requests.length), 1, 'a saved token preloads the feed at mount');
+  assert.equal(await warm.evaluate(() => window.__targetlistShadow.querySelector('.panel').hidden), true);
+  assert.equal(await warm.evaluate(() => window.__mock.requests[0].data), undefined, 'restoration sends no API key');
+  assert.equal(await warm.evaluate(() => window.__mock.requests[0].headers.Authorization), 'Bearer mock-session-token');
+  await warm.evaluate(() => window.__mock.release('/api/targets'));
+  await wait(warm, () => window.__targetlistShadow.querySelectorAll('.card').length === 4);
+  assert.equal(warm.url(), 'about:blank', 'preloading never opens an attack by itself');
+  assert.equal((await cardSnapshot(warm, 102)).attack, null, 'cached Hospital does not expose an attack link');
+  let warmDestination;
+  await warm.route(attackUrl, async route => {
+    warmDestination = { url: route.request().url(), navigation: route.request().isNavigationRequest() };
+    await route.fulfill({ status: 200, contentType: 'text/html',
+      body: '<!doctype html><title>Cached mock destination</title><h1>Cached destination only: no attack executed</h1>' });
+  });
+  const warmNavigation = warm.waitForURL(attackUrl, { timeout: 5000 });
+  const warmRequests = await warm.evaluate(() => {
+    window.__targetlistShadow.querySelector('.launcher').click();
+    return structuredClone(window.__mock.requests);
+  });
+  await warmNavigation;
+  assert.equal(warmRequests.length, 1, 'the warm click adds no feed or individual status request');
+  assert.equal(warmRequests[0].path, '/api/targets');
+  assert.equal(warmRequests.some(request => request.path.endsWith('/status')), false);
+  assert.equal(warmDestination.url, attackUrl);
+  assert.equal(warmDestination.navigation, true);
+  assert.equal(await warm.locator('h1').textContent(), 'Cached destination only: no attack executed');
+  await warm.close();
+  console.log('PASS saved-token startup preload, cached Hospital exclusion, ready-before-unknown selection, and warm NWA click with zero extra requests');
+
+  for (const expired of ['status', 'authorization']) {
+    const stale = await mount(undefined, [source], context, expired => {
+      const mock = window.__mock;
+      mock.store.set(`targetlist.session.${mock.serviceOrigin}`, {
+        token: 'mock-session-token', expiresAt: new Date(Date.now() + 7 * 86400000).toISOString()
+      });
+      mock.targets[0].status = { state: 'Okay', description: 'Okay (cached mock)', until: null };
+      mock.targets[0].checkedAt = new Date(Date.now() + (expired === 'authorization' ? 1000 : -30000)).toISOString();
+    }, expired);
+    await wait(stale, () => window.__targetlistShadow.querySelectorAll('.card').length === 4);
+    await stale.evaluate(expired => {
+      if (expired === 'authorization') {
+        window.__mockNow += 30000;
+        // Status remains fresh while its authorized feed snapshot has reached the deadline.
+        window.__mock.targets[0].checkedAt = new Date(Date.now()).toISOString();
+      }
+      window.__mock.holds.push(expired === 'status' ? '/api/targets/101/status' : '/api/targets');
+    }, expired);
+    let staleDestination;
+    await stale.route(attackUrl, async route => {
+      staleDestination = route.request().url();
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><h1>Rechecked mock destination only</h1>' });
+    });
+    await shadow(stale, '.launcher', 'click');
+    await wait(stale, () => window.__mock.pending.length === 1);
+    assert.equal(stale.url(), 'about:blank');
+    assert.equal(staleDestination, undefined);
+    const pendingPath = expired === 'status' ? '/api/targets/101/status' : '/api/targets';
+    const requests = await stale.evaluate(() => structuredClone(window.__mock.requests));
+    assert.equal(requests.length, 2);
+    assert.equal(requests.at(-1).path, pendingPath);
+    if (expired === 'authorization') assert.equal(requests.some(request => request.path.endsWith('/status')), false);
+    const staleNavigation = stale.waitForURL(attackUrl, { timeout: 5000 });
+    await stale.evaluate(path => window.__mock.release(path), pendingPath);
+    await staleNavigation;
+    assert.equal(staleDestination, attackUrl);
+    await stale.close();
+  }
+  console.log('PASS exact 30-second status and authorized-feed deadlines force verification before navigation');
+
   const main = await mount();
   await login(main);
   await assertDock(main);
@@ -381,7 +465,7 @@ try {
   await main.screenshot({ path: path.join(artifacts, 'browser-mobile.png'), fullPage: true });
   console.log('PASS Okay-only attack link, Hospital blocked, desktop and 390px mobile screenshots, no horizontal overflow');
 
-  await main.evaluate(() => { window.__mockNow += 61000; window.__targetlistShadow.querySelector('a.attack').click(); });
+  await main.evaluate(() => { window.__mockNow += 30000; window.__targetlistShadow.querySelector('a.attack').click(); });
   assert.equal(await main.evaluate(() => window.__targetlistShadow.querySelectorAll('a.attack').length), 0);
   assert.match(await shadow(main, '.error', 'text'), /Check this target.*again/);
   await main.close();

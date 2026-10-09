@@ -76,7 +76,8 @@ test('estimates expire after seven days and reject missing or implausibly future
   assert.equal(Core.assess(target({ estimateUpdatedAt: NOW / 1000 + 300 }), player, 0.6, NOW).fresh, true);
 });
 
-test('Ready requires an Okay status checked less than one minute ago', () => {
+test('Ready requires an Okay status checked less than thirty seconds ago', () => {
+  assert.equal(Core.LIVE_STATUS_MAX_AGE, 30_000);
   assert.equal(Core.assess(target(), player, 0.6, NOW).ready, true);
   const nearlyExpired = new Date(NOW - Core.LIVE_STATUS_MAX_AGE + 1).toISOString();
   assert.equal(Core.assess(target({ checkedAt: nearlyExpired }), player, 0.6, NOW).ready, true);
@@ -90,6 +91,23 @@ test('Ready requires an Okay status checked less than one minute ago', () => {
     assert.equal(Core.assess(target({ status: { state } }), player, 0.6, NOW).ready, false);
   }
   assert.equal(Core.assess(target({ status: undefined }), player, 0.6, NOW).ready, false);
+});
+
+test('future or malformed availability timers cannot make a cached Okay target ready', () => {
+  for (const until of [null, undefined, 0, NOW / 1000, NOW / 1000 - 1]) {
+    assert.equal(Core.assess(target({ status: { state: 'Okay', until } }), player, 0.6, NOW).ready, true);
+  }
+  for (const until of [NOW / 1000 + 1, '0', 'invalid', -1, NaN, Infinity, 0.5]) {
+    assert.equal(Core.assess(target({ status: { state: 'Okay', until } }), player, 0.6, NOW).ready, false, String(until));
+  }
+  for (const state of ['Hospital', 'Jail', 'Traveling']) {
+    const future = Core.assess(target({ status: { state, until: NOW / 1000 + 10 } }), player, 0.6, NOW);
+    assert.equal(future.timedUnavailable, true);
+    assert.equal(future.ready, false);
+    const ended = Core.assess(target({ status: { state, until: NOW / 1000 - 1 } }), player, 0.6, NOW);
+    assert.equal(ended.timedUnavailable, false);
+    assert.equal(ended.ready, false, 'an expired hospital timer never becomes an Okay status');
+  }
 });
 
 test('a cached Okay label without a fresh live check never means Ready', () => {

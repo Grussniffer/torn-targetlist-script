@@ -67,10 +67,14 @@ function textContent(element) {
 }
 async function flush() { for (let index = 0; index < 12; index++) await Promise.resolve(); }
 
-function fixture(saved = null, preferences = null, existingHost = null, initialNow = NOW) {
+function fixture(saved = null, preferences = null, existingHost = null, initialNow = NOW, visibility = 'visible') {
   let clock = initialNow;
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [clock])); } static now() { return clock; } }
   const body = new Element('body'); const requests = []; const navigations = []; const storage = new Map(); const writes = []; const timers = []; const timeouts = new Map();
+  const document = new Element('document');
+  Object.assign(document, { body, visibilityState: visibility,
+    getElementById: id => descendants(body).find(element => element.id === id), createElement: tag => new Element(tag),
+    createElementNS: (namespace, tag) => { const node = new Element(tag); node.namespaceURI = namespace; return node; } });
   if (existingHost) body.append(existingHost);
   let nextTimer = 1;
   const storageKey = `targetlist.session.${serviceBase}`;
@@ -80,8 +84,7 @@ function fixture(saved = null, preferences = null, existingHost = null, initialN
   const context = vm.createContext({
     URL, Intl, Date: Clock, console,
     window: { location: { assign: url => navigations.push(url) } },
-    document: { body, getElementById: id => descendants(body).find(element => element.id === id), createElement: tag => new Element(tag),
-      createElementNS: (namespace, tag) => { const node = new Element(tag); node.namespaceURI = namespace; return node; } },
+    document,
     GM_xmlhttpRequest: options => { requests.push(options); },
     GM_getValue: (key, fallback) => storage.get(key) ?? fallback,
     GM_setValue: (key, value) => { storage.set(key, value); writes.push(value); },
@@ -111,7 +114,8 @@ function fixture(saved = null, preferences = null, existingHost = null, initialN
   }
   return { root, host, body, runScript, requests, navigations, storage, writes, storageKey, preferencesKey, timers, timeouts, find, button, response, signIn,
     settings: () => find(element => element.className === 'settings-toggle'),
-    text: () => textContent(root), setNow: value => { clock = value; } };
+    text: () => textContent(root), setNow: value => { clock = value; },
+    setVisibility: value => { document.visibilityState = value; document.emit('visibilitychange'); } };
 }
 
 test('installing NWA replaces a legacy target-list host and keeps the settings gear usable', () => {
@@ -193,7 +197,8 @@ test('login posts the key once, stores only the session token, and authorizes ta
 
 test('a stored session verifies authorization before displaying any targets', async () => {
   const app = fixture({ token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString() });
-  assert.equal(app.requests.length, 0);
+  assert.equal(app.requests.length, 1, 'a saved session preloads the feed at startup');
+  assert.equal(app.find(element => element.className === 'panel').hidden, true);
   app.settings().emit('click');
   assert.equal(app.requests.length, 1);
   assert.equal(app.requests[0].headers.Authorization, `Bearer ${SESSION}`);
@@ -211,7 +216,8 @@ test('a seven-day saved session restores after 30 minutes and on day six without
   for (const age of [31 * 60 * 1000, 6 * 24 * 60 * 60 * 1000]) {
     const restoredAt = NOW + age;
     const app = fixture({ token: SESSION, expiresAt }, null, null, restoredAt);
-    assert.equal(app.requests.length, 0, 'restoring storage does not send an API key');
+    assert.equal(app.requests.length, 1, 'restoring storage starts one token-authorized feed request');
+    assert.equal(app.requests[0].data, undefined, 'restoration never sends an API key');
     assert.equal(app.storage.get(app.storageKey).expiresAt, expiresAt);
     assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
     app.settings().emit('click');
@@ -324,7 +330,7 @@ test('attack clicks revalidate live status expiry even before the next display r
   await flush();
   const attack = app.find(element => element.className === 'attack');
   assert.equal(attack.emit('click').defaultPrevented, false);
-  app.setNow(NOW + 60_000);
+  app.setNow(NOW + 30_000);
   assert.equal(attack.emit('click').defaultPrevented, true);
   assert.match(app.text(), /Check this target’s status again/);
   assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
@@ -336,7 +342,7 @@ test('middle clicks also revalidate an expired status check', async () => {
   app.response(app.requests.at(-1), { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
   await flush();
   const attack = app.find(element => element.className === 'attack');
-  app.setNow(NOW + 60_000);
+  app.setNow(NOW + 30_000);
   assert.equal(attack.emit('auxclick', { button: 1 }).defaultPrevented, true);
   assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
 });
@@ -347,7 +353,7 @@ test('the status-expiry timer removes attack links even while a control has focu
   app.response(app.requests.at(-1), { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
   await flush();
   app.root.activeElement = app.find(element => element.className === 'attack');
-  app.setNow(NOW + 60_000); app.timers[0]();
+  app.setNow(NOW + 30_000); app.timers[0]();
   assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
   assert.match(app.text(), /Status needs checking/);
 });
@@ -397,7 +403,7 @@ test('signing in from NWA continues straight to a live target check', async () =
   assert.equal(app.navigations.length, 1);
 });
 
-test('NWA checks a fresh suitable target live before opening its attack page in the same tab', async () => {
+test('NWA immediately opens a suitable backend-checked target without another request', async () => {
   const app = fixture();
   await app.signIn([
     { ...target, id: 10001, estimatedStats: 100_000, faction: player.faction },
@@ -408,16 +414,9 @@ test('NWA checks a fresh suitable target live before opening its attack page in 
   ]);
   const before = app.requests.length;
   app.button('NWA').emit('click');
-  assert.equal(app.requests.length, before + 1);
-  const live = app.requests.at(-1);
-  assert.equal(live.method, 'GET');
-  assert.equal(live.url, `${serviceBase}/api/targets/${target.id}/status`);
-  assert.equal(live.headers.Authorization, `Bearer ${SESSION}`);
-  assert.deepEqual(app.navigations, [], 'a cached Okay status must not navigate');
-  app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
-  await flush();
+  assert.equal(app.requests.length, before, 'the fresh authorized availability cache needs no network round trip');
   assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
-  assert.equal(app.requests.length, before + 1, 'opening the attack page does not send an attack request');
+  assert.equal(app.requests.length, before, 'opening the attack page does not send an attack request');
 });
 
 test('NWA skips unavailable, newly friendly, and removed targets before opening the next live match', async () => {
@@ -499,6 +498,249 @@ test('a restored session loads an authorized pool before NWA checks a target', a
   app.response(app.requests[1], { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
   await flush();
   assert.equal(app.navigations.length, 1);
+});
+
+test('clicking NWA during startup preload resumes once using the fresh feed without opening settings', async () => {
+  const app = fixture({ token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString() });
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.button('NWA').disabled, false);
+  app.button('NWA').emit('click'); app.button('NWA').emit('click');
+  assert.equal(app.requests.length, 1, 'clicks share the startup feed request');
+  assert.deepEqual(app.navigations, []);
+  app.response(app.requests[0], { player, targets: [{ ...target, checkedAt: new Date(NOW).toISOString() }], warnings: [] });
+  await flush();
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.find(element => element.className === 'panel').hidden, true);
+  assert.deepEqual(Object.keys(app.storage.get(app.storageKey)).sort(), ['expiresAt', 'token']);
+});
+
+test('ready cached targets rank before unchecked lower-stat targets and rotate away from the previous target', async () => {
+  const unchecked = { ...target, id: 11001, estimatedStats: 10_000 };
+  const ready = { ...target, id: 11002, checkedAt: new Date(NOW).toISOString() };
+  const nextReady = { ...ready, id: 11003 };
+  const app = fixture(null, { maxRatio: 0.6, lastTargetId: ready.id });
+  await app.signIn([unchecked, ready, nextReady]);
+  const before = app.requests.length; app.button('NWA').emit('click');
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${nextReady.id}`]);
+  assert.equal(app.requests.length, before);
+  assert.equal(app.storage.get(app.preferencesKey).lastTargetId, nextReady.id);
+});
+
+test('an exactly thirty-second-old target check requires a new status request', async () => {
+  const app = fixture();
+  await app.signIn([{ ...target, checkedAt: new Date(NOW - 30_000).toISOString() }]);
+  const before = app.requests.length; app.button('NWA').emit('click');
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${target.id}/status`);
+  assert.deepEqual(app.navigations, []);
+});
+
+test('an exactly thirty-second-old authorized feed is refreshed before using even a newer cached status', async () => {
+  const checkedTarget = { ...target, checkedAt: new Date(NOW + 1000).toISOString() };
+  const app = fixture(); await app.signIn([checkedTarget]);
+  app.setNow(NOW + 30_000); const before = app.requests.length; app.button('NWA').emit('click');
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets`);
+  assert.deepEqual(app.navigations, []);
+  app.response(app.requests.at(-1), { player, targets: [{ ...checkedTarget, checkedAt: new Date(NOW + 30_000).toISOString() }], warnings: [] });
+  await flush();
+  assert.equal(app.requests.length, before + 1);
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+});
+
+test('known future hospital timers are skipped even after their check has become stale', async () => {
+  const hospitalized = { ...target, id: 12001, estimatedStats: 10_000,
+    status: { state: 'Hospital', until: NOW / 1000 + 600 }, checkedAt: new Date(NOW - 60_000).toISOString() };
+  const app = fixture(); await app.signIn([hospitalized, target]);
+  const before = app.requests.length; app.button('NWA').emit('click');
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${target.id}/status`);
+  app.response(app.requests.at(-1), { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+  assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+});
+
+test('an ended hospital timer still needs a new Okay check before opening an attack', async () => {
+  const app = fixture(); await app.signIn([{ ...target, status: { state: 'Hospital', until: NOW / 1000 - 1 },
+    checkedAt: new Date(NOW - 30_000).toISOString() }]);
+  app.button('NWA').emit('click');
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets/${target.id}/status`);
+  assert.deepEqual(app.navigations, []);
+  app.response(app.requests.at(-1), { id: target.id, status: { state: 'Hospital', until: NOW / 1000 - 1 }, checkedAt: new Date(NOW).toISOString() }); await flush();
+  assert.deepEqual(app.navigations, []);
+});
+
+test('visible pages refresh the feed every ten seconds without hiding the target list or automatically navigating', async () => {
+  const app = fixture(); await app.signIn([{ ...target, checkedAt: new Date(NOW).toISOString() }]);
+  app.settings().emit('click');
+  const before = app.requests.length;
+  app.setNow(NOW + 9_999); app.timers[0]();
+  assert.equal(app.requests.length, before);
+  app.setNow(NOW + 10_000); app.timers[0]();
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets`);
+  assert.match(app.text(), /Target Player \[98765\]/);
+  assert.equal(app.button('NWA').disabled, false);
+  app.timers[0]();
+  assert.equal(app.requests.length, before + 1, 'an in-flight background sync is shared');
+  app.response(app.requests.at(-1), { player, targets: [{ ...target, name: 'Refreshed Target', checkedAt: new Date(NOW + 10_000).toISOString() }], warnings: [] }); await flush();
+  assert.match(app.text(), /Refreshed Target/);
+  assert.deepEqual(app.navigations, []);
+  const refreshed = app.requests.length; app.button('NWA').emit('click');
+  assert.equal(app.requests.length, refreshed);
+  assert.equal(app.navigations.length, 1);
+});
+
+test('NWA joins an expired-cache background refresh and resumes with its fresh target', async () => {
+  const app = fixture(); await app.signIn([{ ...target, checkedAt: new Date(NOW).toISOString() }]);
+  app.setNow(NOW + 30_000); app.timers[0]();
+  const background = app.requests.at(-1); const before = app.requests.length;
+  app.button('NWA').emit('click'); app.button('NWA').emit('click');
+  assert.equal(app.requests.length, before);
+  assert.deepEqual(app.navigations, []);
+  app.response(background, { player, targets: [{ ...target, checkedAt: new Date(NOW + 30_000).toISOString() }], warnings: [] }); await flush();
+  assert.equal(app.requests.length, before);
+  assert.equal(app.navigations.length, 1);
+});
+
+test('hidden pages do not preload or poll and refresh once when Torn becomes visible', async () => {
+  const app = fixture({ token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString() }, null, null, NOW, 'hidden');
+  assert.equal(app.requests.length, 0);
+  app.setNow(NOW + 60_000); app.timers[0]();
+  assert.equal(app.requests.length, 0);
+  app.setVisibility('visible'); app.setVisibility('visible');
+  assert.equal(app.requests.length, 1);
+  app.response(app.requests[0], { player, targets: [{ ...target, checkedAt: new Date(NOW + 60_000).toISOString() }], warnings: [] }); await flush();
+  app.setVisibility('hidden'); app.setNow(NOW + 120_000); app.timers[0]();
+  assert.equal(app.requests.length, 1);
+  app.setVisibility('visible');
+  assert.equal(app.requests.length, 2);
+  assert.match(app.text(), /Target Player/);
+  assert.deepEqual(app.navigations, []);
+});
+
+test('a failed background authorization attempt keeps browsing data but blocks the instant path until recovery', async () => {
+  const cached = { ...target, checkedAt: new Date(NOW).toISOString() };
+  const app = fixture(); await app.signIn([cached]);
+  app.settings().emit('click');
+  app.setVisibility('hidden'); app.setNow(NOW + 1000); app.setVisibility('visible');
+  app.response(app.requests.at(-1), { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'Cannot verify access right now.' } }, 503); await flush();
+  assert.match(app.text(), /Target Player/);
+  assert.equal(app.storage.get(app.storageKey).token, SESSION);
+  assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
+  const before = app.requests.length; app.button('NWA').emit('click');
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets`);
+  assert.deepEqual(app.navigations, []);
+  app.response(app.requests.at(-1), { player, targets: [cached], warnings: [] }); await flush();
+  assert.equal(app.navigations.length, 1);
+});
+
+test('background faction denial revokes access and a background response cannot restore a signed-out session', async () => {
+  for (const action of ['denial', 'logout']) {
+    const app = fixture(); await app.signIn([{ ...target, checkedAt: new Date(NOW).toISOString() }]);
+    app.setNow(NOW + 30_000); app.timers[0](); const background = app.requests.at(-1);
+    if (action === 'denial') app.response(background, { error: { code: 'FACTION_NOT_ALLOWED', message: 'Faction access revoked.' } }, 403);
+    else { app.button('Sign out').emit('click'); app.response(background, { player, targets: [target], warnings: [] }); }
+    await flush();
+    assert.equal(app.storage.has(app.storageKey), false);
+    assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
+    assert.deepEqual(app.navigations, []);
+  }
+});
+
+test('a due background poll does not interrupt a manual target check selection', async () => {
+  const app = fixture(); await app.signIn(); app.button('NWA').emit('click'); const live = app.requests.at(-1);
+  const before = app.requests.length; app.setNow(NOW + 30_000); app.timers[0]();
+  assert.equal(app.requests.length, before);
+  app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW + 30_000).toISOString() }); await flush();
+  assert.equal(app.navigations.length, 1);
+});
+
+test('an older explicit status response cannot overwrite a newly refreshed target pool', async () => {
+  const app = fixture(); await app.signIn(); app.button('Check status').emit('click');
+  const older = app.requests.at(-1);
+  app.button('Refresh list').emit('click');
+  app.response(app.requests.at(-1), { player, targets: [{ ...target, status: { state: 'Hospital', until: NOW / 1000 + 600 },
+    checkedAt: new Date(NOW).toISOString() }], warnings: [] }); await flush();
+  app.response(older, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+  assert.match(app.text(), /Hospital/);
+  assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
+  assert.equal(app.button('Check status').disabled, false, 'the obsolete status check still releases its pending control');
+});
+
+test('a mismatched explicit status response cannot mark another target available', async () => {
+  const app = fixture(); await app.signIn(); app.button('Check status').emit('click');
+  app.response(app.requests.at(-1), { id: target.id + 1, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+  assert.match(app.text(), /could not verify/);
+  assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
+});
+
+test('background feed refreshes preserve focused search and unfinished stat-limit controls', async () => {
+  for (const control of ['search', 'limit']) {
+    const app = fixture(); await app.signIn(); app.settings().emit('click');
+    const focused = app.find(element => control === 'search' ? element.type === 'search'
+      : element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
+    focused.value = control === 'search' ? 'Target' : '4';
+    if (control === 'search') focused.emit('input');
+    app.root.activeElement = focused;
+    app.setNow(NOW + 10_000); app.timers[0]();
+    assert.equal(app.find(element => element === focused), focused, 'starting a sync keeps the original control');
+    const updatedPlayer = { ...player, name: 'Updated Allowed Player' };
+    app.response(app.requests.at(-1), { player: updatedPlayer, targets: [{ ...target, name: 'Refreshed Target',
+      checkedAt: new Date(NOW + 10_000).toISOString() }], warnings: [] }); await flush();
+    assert.equal(app.root.activeElement, focused);
+    assert.equal(app.find(element => element === focused), focused, 'completing a sync keeps the focused control');
+    assert.equal(focused.value, control === 'search' ? 'Target' : '4');
+    assert.match(app.text(), /Refreshed Target/, 'availability cards still refresh while the control is focused');
+    assert.match(app.text(), /Allowed Player \[12345\]/);
+    assert.doesNotMatch(app.text(), /Updated Allowed Player/);
+    app.root.activeElement = null; app.root.emit('focusout');
+    [...app.timeouts.values()].at(-1)();
+    assert.match(app.text(), /Updated Allowed Player/, 'deferred profile changes render after editing ends');
+  }
+});
+
+test('background feed refreshes retain the focused suggestion textarea and its draft', async () => {
+  const app = fixture(); await app.signIn(); app.settings().emit('click');
+  await openSuggestions(app, { canReview: false, suggestions: [] });
+  const textarea = app.find(element => element.tagName === 'TEXTAREA');
+  textarea.value = 'An unfinished reason with the cursor still here'; textarea.emit('input');
+  app.root.activeElement = textarea;
+  app.setNow(NOW + 10_000); app.timers[0]();
+  assert.equal(app.find(element => element.tagName === 'TEXTAREA'), textarea);
+  app.response(app.requests.at(-1), { player, targets: [target], warnings: [] }); await flush();
+  assert.equal(app.find(element => element.tagName === 'TEXTAREA'), textarea);
+  assert.equal(app.root.activeElement, textarea);
+  assert.equal(textarea.value, 'An unfinished reason with the cursor still here');
+  app.root.activeElement = null; app.root.emit('focusout'); [...app.timeouts.values()].at(-1)();
+  assert.equal(app.find(element => element.tagName === 'TEXTAREA').value, 'An unfinished reason with the cursor still here');
+});
+
+test('a closed settings panel is not rebuilt by background refresh and shows current data when opened', async () => {
+  const app = fixture(); await app.signIn();
+  const oldProfile = app.find(element => element.className === 'profile');
+  app.setNow(NOW + 10_000); app.timers[0]();
+  app.response(app.requests.at(-1), { player: { ...player, name: 'Updated Allowed Player' },
+    targets: [{ ...target, name: 'Refreshed Target' }], warnings: [] }); await flush();
+  assert.equal(app.find(element => element.className === 'profile'), oldProfile);
+  assert.equal(app.find(element => element.className === 'panel').hidden, true);
+  assert.doesNotMatch(app.text(), /Refreshed Target/);
+  app.settings().emit('click');
+  assert.match(app.text(), /Updated Allowed Player/);
+  assert.match(app.text(), /Refreshed Target/);
+});
+
+test('background polling and visibility refresh defer while an explicit status check is pending', async () => {
+  const app = fixture(); await app.signIn(); app.settings().emit('click'); app.button('Check status').emit('click');
+  const live = app.requests.at(-1); const before = app.requests.length;
+  app.setNow(NOW + 10_000); app.timers[0](); app.setVisibility('hidden'); app.setVisibility('visible');
+  assert.equal(app.requests.length, before, 'neither a timer nor a visibility event invalidates the pending check');
+  app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW + 10_000).toISOString() }); await flush();
+  assert.equal(descendants(app.root).some(element => element.className === 'attack'), true);
+  app.timers[0]();
+  assert.equal(app.requests.length, before + 1);
+  assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets`);
 });
 
 test('NWA explains when the pool has no fresh target within the stat limit', async () => {
