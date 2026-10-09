@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="334" viewBox="0 0 960 334" role="img" aria-labelledby="title desc">
+  <title id="title">Install NWA Target Finder in Tampermonkey</title>
+  <desc id="desc">Step 1: Open Tampermonkey Dashboard and Add a new script. Step 2: Replace the starter code with the entire NWA userscript. Step 3: Save and enable the script, then open Torn.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0 0 6 3.5 0 7" fill="none" stroke="#80d99b" stroke-width="1.5"/></marker>
+  </defs>
+  <rect width="960" height="334" rx="18" fill="#101b17"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="24" y="24" width="56" height="32" rx="7" fill="#078826"/>
+    <text x="52" y="45" fill="white" font-size="16" text-anchor="middle" font-weight="700">NWA</text>
+    <text x="94" y="47" fill="#edf7ef" font-size="23" font-weight="700">Tampermonkey · setup overview</text>
+    <text x="25" y="80" fill="#b4c8bb" font-size="15">Illustrated steps. Menu layout may vary by browser.</text>
+
+    <rect x="24" y="103" width="282" height="184" rx="12" fill="#192a21" stroke="#3a5645"/>
+    <circle cx="51" cy="131" r="15" fill="#80d99b"/>
+    <text x="51" y="137" font-size="17" text-anchor="middle" font-weight="700" fill="#102418">1</text>
+    <text x="76" y="137" font-size="18" font-weight="700" fill="#edf7ef">Add a script</text>
+    <text x="43" y="173" font-size="17" fill="#edf7ef">Open Tampermonkey</text>
+    <text x="43" y="202" font-size="17" fill="#edf7ef">Dashboard</text>
+    <path d="M44 220 H65" stroke="#80d99b" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="77" y="226" font-size="16" font-weight="700" fill="#80d99b">Add a new script</text>
+    <text x="43" y="261" font-size="14" fill="#b4c8bb">This opens the script editor.</text>
+
+    <path d="M315 194 H333" stroke="#80d99b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="339" y="103" width="282" height="184" rx="12" fill="#192a21" stroke="#3a5645"/>
+    <circle cx="366" cy="131" r="15" fill="#80d99b"/>
+    <text x="366" y="137" font-size="17" text-anchor="middle" font-weight="700" fill="#102418">2</text>
+    <text x="391" y="137" font-size="18" font-weight="700" fill="#edf7ef">Paste NWA</text>
+    <text x="358" y="173" font-size="17" fill="#edf7ef">Select all starter code.</text>
+    <text x="358" y="202" font-size="17" fill="#edf7ef">Replace it with the full</text>
+    <text x="358" y="226" font-size="17" fill="#edf7ef">NWA userscript.</text>
+    <text x="358" y="261" font-size="14" fill="#b4c8bb">Include the header at the top.</text>
+
+    <path d="M630 194 H648" stroke="#80d99b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="654" y="103" width="282" height="184" rx="12" fill="#192a21" stroke="#3a5645"/>
+    <circle cx="681" cy="131" r="15" fill="#80d99b"/>
+    <text x="681" y="137" font-size="17" text-anchor="middle" font-weight="700" fill="#102418">3</text>
+    <text x="706" y="137" font-size="18" font-weight="700" fill="#edf7ef">Save &amp; enable</text>
+    <text x="673" y="173" font-size="17" fill="#edf7ef">Save the script.</text>
+    <text x="673" y="202" font-size="17" fill="#edf7ef">Keep it enabled.</text>
+    <text x="673" y="231" font-size="17" fill="#80d99b" font-weight="700">Open Torn → NWA</text>
+    <text x="673" y="261" font-size="14" fill="#b4c8bb">Sign in with your Limited key.</text>
+
+    <text x="25" y="314" fill="#b4c8bb" font-size="13">Chrome users: turn on Allow User Scripts in the extension settings (picture below).</text>
+  </g>
+</svg>
