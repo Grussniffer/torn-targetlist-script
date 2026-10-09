@@ -1,0 +1,17 @@
+// ==UserScript==
+// @name         Torn Faction Target List
+// @namespace    torn-faction-targetlist
+// @version      0.2.0
+// @description  Faction-verified chain targets, player and faction suggestions, and leader approval.
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @connect      targetlist.grusmedia.no
+// @connect      127.0.0.1
+// @connect      localhost
+// @run-at       document-idle
+// @noframes
+// ==/UserScript==

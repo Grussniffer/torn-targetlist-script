@@ -1,0 +1,430 @@
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Browser integration checks use mock API data only. No Torn or FFScouter calls occur.
+const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const { chromium } = createRequire(import.meta.url)('playwright');
+const executablePath = process.env.TARGETLIST_BROWSER_PATH || chromium.executablePath();
+if (!existsSync(executablePath)) {
+  throw new Error('No Chromium browser found. Run npx playwright install chromium, or set TARGETLIST_BROWSER_PATH to an installed compatible browser.');
+}
+const source = `${await readFile(path.join(workspace, 'src/core.js'), 'utf8')}\n${await readFile(path.join(workspace, 'src/app.js'), 'utf8')}`;
+const artifacts = path.join(workspace, 'artifacts');
+await mkdir(artifacts, { recursive: true });
+const browser = await chromium.launch({ executablePath, headless: true });
+const context = await browser.newContext({ viewport: { width: 1280, height: 960 } });
+let networkRequests = 0;
+await context.route('**/*', route => { networkRequests++; return route.abort(); });
+const pageErrors = [];
+
+async function mount(viewport = { width: 1280, height: 960 }) {
+  const page = await context.newPage();
+  await page.setViewportSize(viewport);
+  page.on('pageerror', error => pageErrors.push(error.message));
+  await page.goto('about:blank');
+  await page.setContent(`<!doctype html><html lang="en"><head><title>Target list mock browser check</title>
+    <style>body{margin:0;background:#0c141c;color:#c0cdd5;font-family:system-ui,sans-serif}.mock{position:fixed;top:20px;left:20px;max-width:calc(100vw - 40px)}h1{font-size:20px;margin:0 0 8px}p{font-size:13px;max-width:360px;line-height:1.5}</style>
+    </head><body><div class="mock"><h1>MOCK API DATA</h1><p>Browser validation preview. Fictional player names, faction, battle stats and statuses. No live Torn or FFScouter requests.</p></div>
+    <div style="position:fixed;top:3px;right:18px;z-index:2147483647;font-size:10px;letter-spacing:1px;color:#f6d290">MOCK API DATA</div></body></html>`);
+  await page.evaluate(() => {
+    // Closed-root capture is installed before mounting, solely inside this test page.
+    const originalAttachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (options) {
+      const shadow = originalAttachShadow.call(this, options);
+      if (this.id === 'torn-targetlist-host') window.__targetlistShadow = shadow;
+      return shadow;
+    };
+    const originalNow = Date.now;
+    window.__mockNow = originalNow();
+    Date.now = () => window.__mockNow;
+    const now = Math.floor(Date.now() / 1000);
+    const player = { id: 90001, name: 'MockChainer', faction: { id: 44001, name: 'Mock Allowed Faction' },
+      battleStats: { strength: 400000, defense: 250000, speed: 200000, dexterity: 150000, total: 1000000 } };
+    const makeTarget = (id, name, estimatedStats, overrides = {}) => ({ id, name, level: 30,
+      faction: { id: 77001, name: 'Mock Target Faction' }, estimatedStats,
+      estimateSource: estimatedStats === null ? null : 'FFScouter',
+      estimateUpdatedAt: estimatedStats === null ? null : now - 3600,
+      status: { state: 'Unknown', description: 'Not checked', until: null },
+      lastAction: now - 86400, checkedAt: null, notes: '', ...overrides });
+    const targets = [makeTarget(101, 'Willow', 300000, { notes: 'Preferred chain target' }),
+      makeTarget(102, 'Granite', 900000), makeTarget(103, 'Mystery', null),
+      makeTarget(104, 'OldEstimate', 200000, { estimateUpdatedAt: now - 8 * 86400 })];
+    const store = new Map();
+    const suggestions = [{ id: '00000000-0000-4000-8000-000000000001', type: 'player', targetId: 21001,
+      targetName: 'Mock Suggested Player', comment: 'A mock reason for adding this target.', status: 'pending',
+      suggestedBy: { id: player.id, name: player.name, faction: player.faction }, createdAt: new Date(Date.now()).toISOString(),
+      reviewedBy: null, reviewedAt: null }];
+    window.__mock = { requests: [], pending: [], holds: [], overrides: {}, player, targets, store, suggestions, canReview: false };
+    window.GM_getValue = (key, fallback) => store.has(key) ? store.get(key) : fallback;
+    window.GM_setValue = (key, value) => store.set(key, value);
+    window.GM_deleteValue = key => store.delete(key);
+    function respond(request) {
+      const url = new URL(request.url);
+      const override = window.__mock.overrides[url.pathname];
+      if (override?.networkError) { request.onerror(); return; }
+      let data, status = override?.status || 200;
+      if (override) data = override.data;
+      else if (url.pathname === '/api/session' && request.method === 'POST') {
+        data = { token: 'mock-session-token', expiresAt: new Date(Date.now() + 3600000).toISOString(), player };
+      } else if (url.pathname === '/api/session' && request.method === 'DELETE') data = { success: true };
+      else if (url.pathname === '/api/targets') {
+        data = { player, targets: structuredClone(targets), generatedAt: new Date(Date.now()).toISOString(), warnings: [] };
+      } else if (/^\/api\/targets\/\d+\/status$/.test(url.pathname)) {
+        const id = Number(url.pathname.split('/')[3]);
+        data = { id, faction: { id: 77001, name: 'Mock Target Faction' }, checkedAt: new Date(Date.now()).toISOString(),
+          status: { state: id === 102 ? 'Hospital' : 'Okay', description: id === 102 ? 'In hospital (mock)' : 'Okay (mock)',
+            until: id === 102 ? Math.floor(Date.now() / 1000) + 1200 : null } };
+      } else if (url.pathname === '/api/suggestions' && request.method === 'GET') {
+        const offset = Number(url.searchParams.get('offset') || 0);
+        const view = url.searchParams.get('view');
+        const matching = window.__mock.suggestions.filter(row => view === 'mine' ? row.suggestedBy.id === player.id : row.status === 'pending');
+        data = { canReview: window.__mock.canReview, suggestions: structuredClone(matching.slice(offset, offset + 50)),
+          nextOffset: matching.length > offset + 50 ? offset + 50 : null };
+      } else if (url.pathname === '/api/suggestions' && request.method === 'POST') {
+        const body = JSON.parse(request.data); status = 201;
+        const row = { ...body, id: `00000000-0000-4000-8000-${String(window.__mock.suggestions.length + 1).padStart(12, '0')}`,
+          targetName: body.type === 'faction' ? 'Mock Suggested Faction' : 'Mock Suggested Player', status: 'pending',
+          suggestedBy: { id: player.id, name: player.name, faction: player.faction }, createdAt: new Date(Date.now()).toISOString(),
+          reviewedBy: null, reviewedAt: null };
+        window.__mock.suggestions.push(row); data = { suggestion: structuredClone(row) };
+      } else if (/^\/api\/suggestions\/[\da-f-]+\/review$/.test(url.pathname) && request.method === 'POST') {
+        if (!window.__mock.canReview) {
+          status = 403; data = { error: { code: 'REVIEW_NOT_ALLOWED', message: 'Mock leadership permission removed' } };
+        } else {
+          const row = window.__mock.suggestions.find(row => row.id === url.pathname.split('/')[3]);
+          const decision = JSON.parse(request.data).decision;
+          row.status = decision; row.reviewedBy = { id: player.id, name: player.name, faction: player.faction }; row.reviewedAt = new Date(Date.now()).toISOString();
+          if (decision === 'approved') targets.push(makeTarget(row.targetId, 'Mock Approved Player', 200000));
+          data = { suggestion: structuredClone(row), addedPlayers: decision === 'approved' ? 1 : 0 };
+        }
+      } else throw new Error(`Unexpected mock path: ${request.method} ${url.pathname}`);
+      request.onload({ status,
+        responseText: override?.invalidJson ? '{invalid JSON' : JSON.stringify(data),
+        finalUrl: override?.finalUrl || request.url });
+    }
+    window.GM_xmlhttpRequest = request => {
+      const url = new URL(request.url);
+      if (url.origin !== window.__mock.serviceOrigin) throw new Error('Test attempted an unexpected provider request.');
+      window.__mock.requests.push({ method: request.method, path: url.pathname, search: url.search, headers: request.headers, data: request.data });
+      if (window.__mock.holds.includes(url.pathname)) window.__mock.pending.push(request);
+      else setTimeout(() => respond(request), 1);
+      return { abort() { request.onabort?.(); } };
+    };
+    window.__mock.release = pathname => {
+      const pending = window.__mock.pending.filter(request => new URL(request.url).pathname === pathname);
+      window.__mock.pending = window.__mock.pending.filter(request => new URL(request.url).pathname !== pathname);
+      window.__mock.holds = window.__mock.holds.filter(value => value !== pathname);
+      for (const request of pending) respond(request);
+    };
+  });
+  await page.addScriptTag({ content: `${source}\nwindow.__mock.serviceOrigin = new URL(CONFIG.serviceUrl).origin;` });
+  return page;
+}
+
+async function shadow(page, selector, operation, argument) {
+  return page.evaluate(({ selector, operation, argument }) => {
+    const node = window.__targetlistShadow.querySelector(selector);
+    if (!node) throw new Error(`Missing UI element: ${selector}`);
+    if (operation === 'click') node.click();
+    if (operation === 'fill') { node.value = argument; node.dispatchEvent(new Event('input', { bubbles: true })); }
+    if (operation === 'select') { node.value = argument; node.dispatchEvent(new Event('change', { bubbles: true })); }
+    if (operation === 'submit') node.requestSubmit();
+    if (operation === 'text') return node.textContent;
+  }, { selector, operation, argument });
+}
+async function wait(page, expression) {
+  await page.waitForFunction(expression, undefined, { timeout: 5000 });
+}
+async function login(page) {
+  await shadow(page, '.launcher', 'click');
+  await shadow(page, 'input[type=password]', 'fill', 'MockLimitedKey01');
+  await shadow(page, 'form', 'submit');
+  await wait(page, () => window.__targetlistShadow.querySelectorAll('.card').length === 4);
+}
+async function cardAction(page, id) {
+  await page.evaluate(id => {
+    const card = [...window.__targetlistShadow.querySelectorAll('.card')]
+      .find(node => node.querySelector('.name').textContent.includes(`[${id}]`));
+    if (!card) throw new Error(`Missing card for ${id}`);
+    card.querySelector('button').click();
+  }, id);
+}
+async function cardSnapshot(page, id) {
+  return page.evaluate(id => {
+    const card = [...window.__targetlistShadow.querySelectorAll('.card')]
+      .find(node => node.querySelector('.name').textContent.includes(`[${id}]`));
+    return card ? { text: card.textContent, attack: card.querySelector('a.attack')?.getAttribute('href') || null } : null;
+  }, id);
+}
+async function signOut(page) {
+  await shadow(page, '.profile button', 'click');
+  await wait(page, () => Boolean(window.__targetlistShadow.querySelector('form.login')));
+}
+async function clickButton(page, text) {
+  await page.evaluate(text => {
+    const node = [...window.__targetlistShadow.querySelectorAll('button')].find(button => button.textContent === text);
+    if (!node) throw new Error(`Missing button: ${text}`);
+    node.click();
+  }, text);
+}
+async function openSuggestions(page) {
+  await clickButton(page, 'Suggestions');
+  await wait(page, () => Boolean(window.__targetlistShadow.querySelector('.suggestionform')) && !window.__targetlistShadow.querySelector('.queueheader button').disabled);
+}
+async function fillSuggestion(page, { type = 'player', targetId = '22001', comment = 'Mock useful chain target.' } = {}) {
+  await shadow(page, '[aria-label="Suggestion type"]', 'select', type);
+  await shadow(page, '[aria-label="Player or faction ID"]', 'fill', targetId);
+  await shadow(page, 'textarea', 'fill', comment);
+}
+async function submitSuggestion(page) {
+  await shadow(page, '.suggestionform', 'submit');
+}
+
+try {
+  const main = await mount();
+  await login(main);
+  assert.match(await shadow(main, '.profile', 'text'), /MockChainer \[90001\].*Mock Allowed Faction/s);
+  assert.match(await shadow(main, '.statgrid', 'text'), /Strength400K.*Defense250K.*Speed200K.*Dexterity150K/s);
+  assert.match((await cardSnapshot(main, 103)).text, /Stats unknown.*Unknown/s);
+  assert.equal((await main.evaluate(() => [...window.__targetlistShadow.querySelectorAll('a.attack')].length)), 0);
+  assert.equal(await main.evaluate(() => [...window.__mock.store.values()][0]?.token), 'mock-session-token');
+  assert.equal(await main.evaluate(() => JSON.stringify([...window.__mock.store.values()]).includes('MockLimitedKey01')), false);
+  console.log('PASS login, identity, faction, battle stats, local token only, unknown estimates retained');
+
+  await shadow(main, 'select', 'select', 'suggested');
+  assert.equal(await main.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 1);
+  assert.match(await shadow(main, '.cards', 'text'), /Willow/);
+  await shadow(main, 'select', 'select', 'all');
+  await shadow(main, 'input[type=search]', 'fill', 'preferred chain');
+  assert.equal(await main.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 1);
+  await shadow(main, 'input[type=search]', 'fill', 'mystery');
+  assert.match(await shadow(main, '.cards', 'text'), /Mystery.*Stats unknown/s);
+  await shadow(main, 'input[type=search]', 'fill', '');
+  console.log('PASS possible matches, stale/unknown/above-limit exclusion, search across notes and names');
+
+  await cardAction(main, 101);
+  await wait(main, () => Boolean(window.__targetlistShadow.querySelector('a.attack')));
+  assert.equal((await cardSnapshot(main, 101)).attack, 'https://www.torn.com/loader.php?sid=attack&user2ID=101');
+  await cardAction(main, 102);
+  await wait(main, () => !window.__targetlistShadow.textContent.includes('Checking…'));
+  assert.match((await cardSnapshot(main, 102)).text, /Hospital/);
+  assert.equal((await cardSnapshot(main, 102)).attack, null);
+  await main.screenshot({ path: path.join(artifacts, 'browser-desktop.png'), fullPage: true });
+  await main.setViewportSize({ width: 390, height: 844 });
+  const mobileGeometry = await main.evaluate(() => {
+    const panel = window.__targetlistShadow.querySelector('.panel');
+    const scroll = window.__targetlistShadow.querySelector('.scroll');
+    const rect = panel.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, width: innerWidth,
+      documentWidth: document.documentElement.scrollWidth, scrollWidth: scroll.scrollWidth, clientWidth: scroll.clientWidth };
+  });
+  assert(mobileGeometry.left >= 0 && mobileGeometry.right <= mobileGeometry.width, JSON.stringify(mobileGeometry));
+  assert(mobileGeometry.documentWidth <= mobileGeometry.width && mobileGeometry.scrollWidth <= mobileGeometry.clientWidth + 1,
+    JSON.stringify(mobileGeometry));
+  await main.screenshot({ path: path.join(artifacts, 'browser-mobile.png'), fullPage: true });
+  console.log('PASS Okay-only attack link, Hospital blocked, desktop and 390px mobile screenshots, no horizontal overflow');
+
+  await main.evaluate(() => { window.__mockNow += 61000; window.__targetlistShadow.querySelector('a.attack').click(); });
+  assert.equal(await main.evaluate(() => window.__targetlistShadow.querySelectorAll('a.attack').length), 0);
+  assert.match(await shadow(main, '.error', 'text'), /Check this target.*again/);
+  await main.close();
+  console.log('PASS stale status cannot open an attack');
+
+  for (const heldPath of ['/api/targets/101/status', '/api/targets']) {
+    const race = await mount();
+    await login(race);
+    await race.evaluate(heldPath => { window.__mock.holds.push(heldPath); }, heldPath);
+    if (heldPath.endsWith('/status')) await cardAction(race, 101);
+    else await shadow(race, '.controls button', 'click');
+    await wait(race, () => window.__mock.pending.length === 1);
+    await signOut(race);
+    await race.evaluate(heldPath => window.__mock.release(heldPath), heldPath);
+    await race.evaluate(() => new Promise(resolve => setTimeout(resolve, 20)));
+    assert.equal(await race.evaluate(() => Boolean(window.__targetlistShadow.querySelector('form.login'))), true);
+    assert.equal(await race.evaluate(() => window.__targetlistShadow.querySelectorAll('.card,a.attack').length), 0);
+    assert.equal(await race.evaluate(() => window.__mock.store.size), 0);
+    await race.close();
+  }
+  console.log('PASS sign out during pending target/status requests cannot resurrect session or cards');
+
+  for (const failure of [
+    { status: 503, data: { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'Mock provider unavailable' } } },
+    { networkError: true },
+    { invalidJson: true },
+    { data: {}, finalUrl: 'https://example.invalid/redirect' }
+  ]) {
+    const errors = await mount();
+    await login(errors);
+    await cardAction(errors, 101);
+    await wait(errors, () => Boolean(window.__targetlistShadow.querySelector('a.attack')));
+    await errors.evaluate(failure => { window.__mock.overrides['/api/targets/101/status'] = failure; }, failure);
+    await cardAction(errors, 101);
+    await wait(errors, () => !window.__targetlistShadow.querySelector('.error').hidden);
+    assert.equal((await cardSnapshot(errors, 101)).attack, null);
+    await errors.close();
+  }
+  console.log('PASS service, network, malformed JSON and redirected responses remove attack availability');
+
+  const revoked = await mount();
+  await login(revoked);
+  await revoked.evaluate(() => { window.__mock.overrides['/api/targets/101/status'] =
+    { status: 403, data: { error: { code: 'FACTION_NOT_ALLOWED', message: 'Mock faction authorization revoked' } } }; });
+  await cardAction(revoked, 101);
+  await wait(revoked, () => Boolean(window.__targetlistShadow.querySelector('form.login')));
+  assert.equal(await revoked.evaluate(() => window.__mock.store.size), 0);
+  assert.equal(await revoked.evaluate(() => window.__targetlistShadow.querySelectorAll('a.attack').length), 0);
+  await revoked.close();
+  console.log('PASS revoked faction authorization clears local session and target access');
+
+  const member = await mount();
+  await login(member); await openSuggestions(member);
+  assert.equal(await member.evaluate(() => [...window.__targetlistShadow.querySelectorAll('button')].some(node => ['Approve', 'Reject'].includes(node.textContent))), false);
+  await fillSuggestion(member, { comment: '   \n  ' });
+  const beforeBlank = await member.evaluate(() => window.__mock.requests.length);
+  await submitSuggestion(member);
+  assert.equal(await member.evaluate(() => window.__mock.requests.length), beforeBlank);
+  assert.match(await shadow(member, '.error', 'text'), /Add a reason/);
+  for (const type of ['player', 'faction']) {
+    await fillSuggestion(member, { type, targetId: type === 'player' ? '22001' : '33001', comment: '  A detailed mock reason.\n  ' });
+    await submitSuggestion(member);
+    await wait(member, () => Boolean(window.__targetlistShadow.querySelector('.success')) && !window.__targetlistShadow.querySelector('.suggestionform button').disabled);
+    const post = await member.evaluate(() => window.__mock.requests.filter(row => row.method === 'POST' && row.path === '/api/suggestions').at(-1));
+    assert.deepEqual(JSON.parse(post.data), { type, targetId: type === 'player' ? 22001 : 33001, comment: 'A detailed mock reason.' });
+    assert.equal(await member.evaluate(() => window.__targetlistShadow.querySelector('textarea').value), '');
+  }
+  assert.match(await shadow(member, '.suggestionqueue', 'text'), /Mock Suggested Faction.*current players added on approval/s);
+  console.log('PASS member player/faction suggestions, required trimmed comments, and leader-only controls');
+
+  await fillSuggestion(member, { type: 'faction', targetId: '44004', comment: 'Retain this draft after a provider failure.' });
+  await member.evaluate(() => { window.__mock.overrides['/api/suggestions'] = { status: 503, data: { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'Mock suggestion provider unavailable' } } }; });
+  await submitSuggestion(member);
+  await wait(member, () => window.__targetlistShadow.querySelector('.error').textContent.includes('Mock suggestion provider unavailable'));
+  assert.equal(await member.evaluate(() => window.__targetlistShadow.querySelector('textarea').value), 'Retain this draft after a provider failure.');
+  assert.equal(await member.evaluate(() => window.__targetlistShadow.querySelector('[aria-label="Suggestion type"]').value), 'faction');
+  assert.equal(await member.evaluate(() => window.__mock.store.size), 1);
+  await member.evaluate(() => {
+    delete window.__mock.overrides['/api/suggestions'];
+    const row = window.__mock.suggestions[0];
+    row.targetName = '<img src=x onerror="window.__injected=true">';
+    row.comment = '<script>window.__injected=true</script>\n<img src=x onerror="window.__injected=true">';
+    row.suggestedBy.name = '<svg onload="window.__injected=true">';
+  });
+  await clickButton(member, 'Refresh suggestions');
+  await wait(member, () => !window.__targetlistShadow.querySelector('.queueheader button').disabled);
+  assert.match(await shadow(member, '.suggestionqueue', 'text'), /<script>window.__injected=true<\/script>/);
+  assert.equal(await member.evaluate(() => window.__targetlistShadow.querySelectorAll('.suggestionqueue img,.suggestionqueue script,.suggestionqueue svg').length), 0);
+  assert.equal(await member.evaluate(() => window.__injected), undefined);
+  assert.equal(await member.evaluate(() => window.__targetlistShadow.querySelector('textarea').value), 'Retain this draft after a provider failure.');
+  console.log('PASS draft retention on provider failure and plain-text rendering of untrusted queue content');
+
+  await member.evaluate(() => {
+    const template = window.__mock.suggestions[1];
+    window.__mock.suggestions = Array.from({ length: 60 }, (_, index) => ({ ...structuredClone(template),
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`, targetId: 50000 + index, targetName: `Mock Queue Player ${index + 1}` }));
+  });
+  await clickButton(member, 'Refresh suggestions');
+  await wait(member, () => window.__targetlistShadow.querySelectorAll('.suggestioncard').length === 50);
+  await clickButton(member, 'Load more suggestions');
+  await wait(member, () => window.__targetlistShadow.querySelectorAll('.suggestioncard').length === 60);
+  assert.equal(await member.evaluate(() => window.__mock.requests.at(-1).search), '?view=pending&offset=50');
+  await clickButton(member, 'My suggestions');
+  await wait(member, () => window.__targetlistShadow.querySelectorAll('.suggestioncard').length === 50);
+  await clickButton(member, 'Load more suggestions');
+  await wait(member, () => window.__targetlistShadow.querySelectorAll('.suggestioncard').length === 60);
+  assert.equal(await member.evaluate(() => window.__mock.requests.at(-1).search), '?view=mine&offset=50');
+  await member.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await member.evaluate(() => {
+    const panel = window.__targetlistShadow.querySelector('.panel').getBoundingClientRect();
+    const scroll = window.__targetlistShadow.querySelector('.scroll');
+    return panel.left >= 0 && panel.right <= innerWidth && scroll.scrollWidth <= scroll.clientWidth + 1;
+  }), true);
+  await member.close();
+  console.log('PASS pending/history pagination beyond 50 suggestions and desktop/mobile form layout');
+
+  const leader = await mount(); await login(leader);
+  await leader.evaluate(() => { window.__mock.canReview = true; });
+  await openSuggestions(leader);
+  await fillSuggestion(leader, { type: 'faction', targetId: '44004', comment: 'Mock required comment: inactive roster suitable for chains.' });
+  await leader.evaluate(() => { window.__targetlistShadow.querySelector('.scroll').scrollTop = 180; });
+  await leader.screenshot({ path: path.join(artifacts, 'browser-suggestions-desktop.png'), fullPage: true });
+  await leader.setViewportSize({ width: 390, height: 844 });
+  await leader.evaluate(() => { window.__targetlistShadow.querySelector('.scroll').scrollTop = 320; });
+  await leader.screenshot({ path: path.join(artifacts, 'browser-suggestions-mobile.png'), fullPage: true });
+  await leader.setViewportSize({ width: 1280, height: 960 });
+  await clickButton(leader, 'Approve');
+  await wait(leader, () => window.__targetlistShadow.querySelector('.success')?.textContent.includes('1 player added') && !window.__targetlistShadow.querySelector('.suggestionform button').disabled);
+  assert.equal(await leader.evaluate(() => window.__mock.suggestions[0].status), 'approved');
+  await clickButton(leader, 'Targets');
+  assert.equal(await leader.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 5);
+  assert.match(await shadow(leader, '.cards', 'text'), /Mock Approved Player/);
+  await leader.evaluate(() => {
+    const first = window.__mock.suggestions[0];
+    window.__mock.suggestions.push({ ...structuredClone(first), id: '00000000-0000-4000-8000-000000000002',
+      type: 'faction', targetId: 33004, targetName: 'Mock Rejected Faction', status: 'pending', reviewedBy: null, reviewedAt: null });
+  });
+  await openSuggestions(leader); await clickButton(leader, 'Reject');
+  await wait(leader, () => window.__targetlistShadow.querySelector('.success')?.textContent.includes('Suggestion rejected') && !window.__targetlistShadow.querySelector('.suggestionform button').disabled);
+  await clickButton(leader, 'My suggestions');
+  await wait(leader, () => window.__targetlistShadow.querySelectorAll('.suggestioncard').length === 2);
+  assert.match(await shadow(leader, '.suggestionqueue', 'text'), /approved.*Approved by MockChainer.*rejected.*Rejected by MockChainer/s);
+  await leader.close();
+  console.log('PASS leadership approval refreshes targets, rejection, and reviewed history');
+
+  const demoted = await mount(); await login(demoted);
+  await demoted.evaluate(() => { window.__mock.canReview = true; });
+  await openSuggestions(demoted); await fillSuggestion(demoted, { comment: 'Draft survives leadership removal.' });
+  await demoted.evaluate(() => { window.__mock.canReview = false; });
+  await clickButton(demoted, 'Approve');
+  await wait(demoted, () => window.__targetlistShadow.querySelector('.error').textContent.includes('Mock leadership permission removed'));
+  assert.equal(await demoted.evaluate(() => window.__mock.store.size), 1);
+  assert.equal(await demoted.evaluate(() => [...window.__targetlistShadow.querySelectorAll('button')].some(node => ['Approve', 'Reject'].includes(node.textContent))), false);
+  assert.equal(await demoted.evaluate(() => window.__targetlistShadow.querySelector('textarea').value), 'Draft survives leadership removal.');
+  await clickButton(demoted, 'Targets');
+  assert.equal(await demoted.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 4);
+  await demoted.close();
+  console.log('PASS leadership removal hides review controls while preserving valid session and draft');
+
+  for (const action of ['queue', 'submit', 'review']) {
+    const race = await mount(); await login(race);
+    await race.evaluate(() => { window.__mock.canReview = true; });
+    let heldPath = '/api/suggestions';
+    if (action === 'queue') {
+      await race.evaluate(() => { window.__mock.holds.push('/api/suggestions'); });
+      await clickButton(race, 'Suggestions');
+    } else {
+      await openSuggestions(race);
+      if (action === 'submit') {
+        await fillSuggestion(race);
+        await race.evaluate(() => { window.__mock.holds.push('/api/suggestions'); });
+        await submitSuggestion(race);
+      } else {
+        heldPath = '/api/suggestions/00000000-0000-4000-8000-000000000001/review';
+        await race.evaluate(path => { window.__mock.holds.push(path); }, heldPath);
+        await clickButton(race, 'Approve');
+      }
+    }
+    await wait(race, () => window.__mock.pending.length === 1);
+    await signOut(race); const count = await race.evaluate(() => window.__mock.requests.length);
+    await race.evaluate(path => window.__mock.release(path), heldPath);
+    await race.evaluate(() => new Promise(resolve => setTimeout(resolve, 20)));
+    assert.equal(await race.evaluate(() => window.__mock.requests.length), count);
+    assert.equal(await race.evaluate(() => Boolean(window.__targetlistShadow.querySelector('form.login'))), true);
+    assert.equal(await race.evaluate(() => window.__targetlistShadow.querySelectorAll('.suggestioncard,textarea').length), 0);
+    assert.equal(await race.evaluate(() => window.__mock.store.size), 0);
+    await race.close();
+  }
+  console.log('PASS sign out during suggestion queue/submission/review cannot restore content or trigger refreshes');
+
+  assert.equal(networkRequests, 0, 'Browser attempted external network access');
+  assert.deepEqual(pageErrors, [], 'Unhandled browser errors');
+  console.log('All mocked browser smoke checks passed. No provider requests or live keys used.');
+  console.log(`Mock screenshots: ${path.join(artifacts, 'browser-desktop.png')} and ${path.join(artifacts, 'browser-mobile.png')}`);
+  console.log(`Mock suggestion screenshots: ${path.join(artifacts, 'browser-suggestions-desktop.png')} and ${path.join(artifacts, 'browser-suggestions-mobile.png')}`);
+} finally {
+  await context.close();
+  await browser.close();
+}
