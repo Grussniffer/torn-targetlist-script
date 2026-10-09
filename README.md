@@ -4,15 +4,13 @@ Find chain targets for **North West Alliance**.
 
 ## Install
 
-[Install the latest NWA script](https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js), or open the [script](dist/torn-targetlist.user.js) and copy all its code.
+[**Install NWA Target Finder**](https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js)
 
 ### Tampermonkey
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
-2. Open its **Dashboard** and click **Add a new script**.
-3. Replace the starter code with the copied script, save it, and make sure it is enabled.
-
-![Tampermonkey setup overview: open Dashboard, add a script, paste the full NWA code, then save and enable](docs/images/tampermonkey-setup.svg)
+2. Click the **Install NWA Target Finder** link above and confirm **Install** in Tampermonkey.
+3. Reload Torn.
 
 On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([help](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q209)).
 
@@ -23,14 +21,13 @@ On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([
 ### Torn PDA
 
 1. Open **Settings → Advanced Browser Settings** and turn on **Enable custom user scripts**.
-2. Open **Manage scripts**, tap **+**, name it **NWA Target Finder**, and paste the copied script into **Paste source code**.
-3. Leave **Injection time** at **END**, tap **Add**, make sure the script is enabled, and reload Torn inside PDA.
+2. Open **Manage scripts → +**. Tap **Configure** beside **Remote load/update**, and enter this link in **Remote URL**:
 
-<img src="docs/images/torn-pda-setup.svg" width="640" alt="Torn PDA setup overview: enable scripts, open Manage Scripts and plus, enter the NWA script name and full code, choose END, then Add and reload">
+   ```text
+   https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js
+   ```
 
-Torn PDA still needs testing on a device.
-
-*The setup pictures illustrate the steps. Menu layouts may vary. See [Tampermonkey's guide](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q102) and [Torn PDA's guide](https://faq.kwack.dev/pda/scripts).*
+3. Tap **Fetch → Load**, choose **Continue** if permissions appear, and reload Torn inside PDA.
 
 ## Start
 
@@ -55,4 +52,4 @@ The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusm
 
 Your key is sent to the backend and Torn for login and kept only for your session. Only allowed factions can use the list. Battle stats are estimates; attacks are manual.
 
-To update, use the install link or replace the code in your existing userscript and save it, then reload Torn. Disable any separate old **Torn Faction Target List** entry. The settings header shows the installed NWA version; **v0.3.1** has the compact green NWA tab and the white gear directly underneath.
+Disable any separate old **Torn Faction Target List** entry. Your installed version appears in the settings header.
