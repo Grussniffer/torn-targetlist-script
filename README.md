@@ -4,7 +4,7 @@ Find chain targets for **North West Alliance**.
 
 ## Install
 
-Open the [script](dist/torn-targetlist.user.js) and copy all its code.
+[Install the latest NWA script](https://raw.githubusercontent.com/Grussniffer/torn-targetlist-script/codex/initial/dist/torn-targetlist.user.js), or open the [script](dist/torn-targetlist.user.js) and copy all its code.
 
 ### Tampermonkey
 
@@ -55,4 +55,4 @@ The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusm
 
 Your key is sent to the backend and Torn for login and kept only for your session. Only allowed factions can use the list. Battle stats are estimates; attacks are manual.
 
-To update, replace the code in your existing userscript and save it.
+To update, use the install link or replace the code in your existing userscript and save it, then reload Torn. Disable any separate old **Torn Faction Target List** entry. The settings header shows the installed NWA version; **v0.3.1** has the compact green NWA tab and the white gear directly underneath.

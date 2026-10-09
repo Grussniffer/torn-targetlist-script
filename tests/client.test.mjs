@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const source = `${await readFile(new URL('../src/core.js', import.meta.url), 'utf8')}\n${await readFile(new URL('../src/app.js', import.meta.url), 'utf8')}`;
+const coreSource = await readFile(new URL('../src/core.js', import.meta.url), 'utf8');
+const appSource = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+const source = `${coreSource}\n${appSource}`;
 // Read the configured address without mounting; all requests below are manual mocks.
-const serviceBase = vm.runInNewContext(`${source}\nTargetListCore.serviceUrl(CONFIG.serviceUrl);`, {
-  URL, document: { getElementById: () => true },
-});
+const configSource = appSource.match(/^const CONFIG = .*;$/m)[0];
+const { serviceBase, version: scriptVersion } = vm.runInNewContext(
+  `${coreSource}\n${configSource}\n({ serviceBase: TargetListCore.serviceUrl(CONFIG.serviceUrl), version: CONFIG.version });`, { URL });
 const NOW = Date.parse('2026-10-09T12:00:00Z');
 const KEY = 'AbCdEfGh12345678';
 const SESSION = 'opaque-session-token';
@@ -27,11 +29,24 @@ class Element {
   constructor(tag) {
     this.tagName = tag.toUpperCase(); this.children = []; this.listeners = new Map();
     this.attributes = new Map(); this.style = {}; this.value = ''; this.textContent = '';
-    this.activeElement = null;
+    this.activeElement = null; this.parentNode = null;
   }
-  append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this.children = children; }
+  append(...children) {
+    for (const child of children) {
+      if (typeof child === 'object') { child.remove(); child.parentNode = this; }
+      this.children.push(child);
+    }
+  }
+  replaceChildren(...children) {
+    for (const child of this.children) if (typeof child === 'object') child.parentNode = null;
+    this.children = []; this.append(...children);
+  }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  remove() {
+    if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this);
+    this.parentNode = null;
+  }
   addEventListener(name, callback) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
     this.listeners.get(name).push(callback);
@@ -52,10 +67,11 @@ function textContent(element) {
 }
 async function flush() { for (let index = 0; index < 12; index++) await Promise.resolve(); }
 
-function fixture(saved = null, preferences = null) {
+function fixture(saved = null, preferences = null, existingHost = null) {
   let clock = NOW;
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [clock])); } static now() { return clock; } }
   const body = new Element('body'); const requests = []; const navigations = []; const storage = new Map(); const writes = []; const timers = []; const timeouts = new Map();
+  if (existingHost) body.append(existingHost);
   let nextTimer = 1;
   const storageKey = `targetlist.session.${serviceBase}`;
   const preferencesKey = `targetlist.preferences.${serviceBase}`;
@@ -64,7 +80,8 @@ function fixture(saved = null, preferences = null) {
   const context = vm.createContext({
     URL, Intl, Date: Clock, console,
     window: { location: { assign: url => navigations.push(url) } },
-    document: { body, getElementById: id => descendants(body).find(element => element.id === id), createElement: tag => new Element(tag) },
+    document: { body, getElementById: id => descendants(body).find(element => element.id === id), createElement: tag => new Element(tag),
+      createElementNS: (namespace, tag) => { const node = new Element(tag); node.namespaceURI = namespace; return node; } },
     GM_xmlhttpRequest: options => { requests.push(options); },
     GM_getValue: (key, fallback) => storage.get(key) ?? fallback,
     GM_setValue: (key, value) => { storage.set(key, value); writes.push(value); },
@@ -73,8 +90,10 @@ function fixture(saved = null, preferences = null) {
     setTimeout: callback => { const id = nextTimer++; timeouts.set(id, callback); return id; },
     clearTimeout: id => timeouts.delete(id),
   });
-  vm.runInContext(source, context);
-  const root = body.children[0].shadow;
+  const runScript = () => vm.runInContext(`(() => {\n${source}\n})();`, context);
+  runScript();
+  const host = body.children.find(element => element.id === 'torn-targetlist-host');
+  const root = host.shadow;
   function find(predicate) { const result = descendants(root).find(predicate); assert.ok(result, 'expected control exists'); return result; }
   function button(label) { return find(element => element.tagName === 'BUTTON' && element.textContent === label); }
   function response(request, data, status = 200) {
@@ -90,10 +109,57 @@ function fixture(saved = null, preferences = null) {
     await flush();
     return login;
   }
-  return { root, requests, navigations, storage, writes, storageKey, preferencesKey, timers, timeouts, find, button, response, signIn,
+  return { root, host, body, runScript, requests, navigations, storage, writes, storageKey, preferencesKey, timers, timeouts, find, button, response, signIn,
     settings: () => find(element => element.className === 'settings-toggle'),
     text: () => textContent(root), setNow: value => { clock = value; } };
 }
+
+test('installing NWA replaces a legacy target-list host and keeps the settings gear usable', () => {
+  for (const previousVersion of [null, '0.3.0']) {
+    const legacy = new Element('div'); legacy.id = 'torn-targetlist-host';
+    if (previousVersion) legacy.setAttribute('data-nwa-version', previousVersion);
+    const legacyButton = new Element('button'); legacyButton.textContent = '◎ Target list';
+    legacy.attachShadow().append(legacyButton);
+    const app = fixture(null, null, legacy);
+    assert.equal(legacy.parentNode, null);
+    assert.equal(app.body.children.filter(element => element.id === 'torn-targetlist-host').length, 1);
+    assert.notEqual(app.host, legacy);
+    assert.equal(app.host.getAttribute('data-nwa-version'), scriptVersion);
+    assert.equal(app.button('NWA').className, 'launcher');
+    assert.equal(descendants(app.settings()).some(element => element.tagName === 'SVG' && element.namespaceURI === 'http://www.w3.org/2000/svg'), true);
+    app.settings().emit('click');
+    assert.equal(app.find(element => element.className === 'panel').hidden, false);
+  }
+});
+
+test('running the current NWA version again preserves one launcher and its existing session', async () => {
+  const app = fixture(); await app.signIn();
+  const host = app.host; const before = app.requests.length;
+  app.runScript();
+  assert.equal(app.body.children.filter(element => element.id === 'torn-targetlist-host').length, 1);
+  assert.equal(app.body.children[0], host);
+  assert.equal(app.timers.length, 1, 'the current version does not mount a second session timer');
+  assert.equal(app.requests.length, before);
+  assert.equal(app.storage.get(app.storageKey).token, SESSION);
+  assert.match(app.text(), /Allowed Player \[12345\]/);
+});
+
+test('an older script cannot replace an already mounted newer NWA version', () => {
+  const [major, minor, patch] = scriptVersion.split('.').map(Number);
+  for (const newerVersion of [`${major}.${minor + 1}.0`, `${major}.${minor}.${patch + 10}`]) {
+    const newerHost = new Element('div'); newerHost.id = 'torn-targetlist-host';
+    newerHost.setAttribute('data-nwa-version', newerVersion);
+    const existingUi = new Element('button'); existingUi.textContent = 'Existing newer NWA';
+    newerHost.attachShadow().append(existingUi);
+    const app = fixture(null, null, newerHost);
+    assert.equal(app.host, newerHost);
+    assert.equal(app.host.getAttribute('data-nwa-version'), newerVersion);
+    assert.equal(app.body.children.length, 1);
+    assert.equal(app.root.children[0], existingUi);
+    assert.equal(app.timers.length, 0);
+    assert.equal(app.requests.length, 0);
+  }
+});
 
 test('invalid key input stays local and the password field is cleared on submission', async () => {
   const app = fixture(); const input = app.find(element => element.type === 'password'); input.value = 'bad-key';

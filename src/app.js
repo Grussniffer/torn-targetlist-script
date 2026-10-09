@@ -1,7 +1,12 @@
 // Keep this service hostname and @connect in metadata.txt in sync when deploying elsewhere.
-const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no' });
+const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.3.1' });
 
-if (!document.getElementById('torn-targetlist-host')) {
+const previousHost = document.getElementById('torn-targetlist-host');
+const mountedVersion = previousHost?.getAttribute('data-nwa-version') || '';
+if (!previousHost || !/^\d+\.\d+\.\d+$/.test(mountedVersion)
+    || mountedVersion.localeCompare(CONFIG.version, undefined, { numeric: true }) < 0) {
+  // Earlier Target List editions used the same host ID and could hide NWA entirely.
+  previousHost?.remove();
   mountTargetList();
 }
 
@@ -16,6 +21,7 @@ function mountTargetList() {
   const savedRatio = preferences?.maxRatio;
   const host = document.createElement('div');
   host.id = 'torn-targetlist-host';
+  host.setAttribute('data-nwa-version', CONFIG.version);
   host.style.cssText = 'position:fixed;inset:0;z-index:2147483000;pointer-events:none;';
   document.body.append(host);
   const root = host.attachShadow({ mode: 'closed' });
@@ -39,13 +45,15 @@ function mountTargetList() {
     a{color:#7fe0ce;text-decoration:none}a:hover{text-decoration:underline}p{margin:0 0 12px}h2,h3{margin:0}
     input,select,textarea{color:#edf4f4;background:#101c24;border:1px solid #3d505b;border-radius:8px;padding:10px;min-width:0}
     input:focus,select:focus,textarea:focus{border-color:#69d7c0}label{display:block}small,.muted{color:#a8b9c2;font-size:12px}
-    .dock{position:absolute;right:0;top:18vh;display:flex;flex-direction:column;align-items:flex-end;gap:3px;pointer-events:auto}
-    .launcher{width:52px;height:36px;padding:0;border:0;border-radius:8px 0 0 8px;background:#078826;color:#fff;font-size:13px;
-      font-weight:800;letter-spacing:.5px;box-shadow:0 3px 15px #0005}.launcher:hover:not(:disabled){background:#0a9e30}
+    .dock{position:absolute;right:0;top:17vh;display:flex;flex-direction:column;align-items:flex-end;gap:0;pointer-events:auto}
+    .launcher{display:grid;place-items:center;width:40px;height:30px;padding:0;border:0;border-radius:8px 0 0 8px;
+      background:#008000;color:#fff;font:400 14px Arial,Helvetica,sans-serif;line-height:1;box-shadow:none}
+    .launcher:hover:not(:disabled){background:#009000}
     .launcher[aria-busy=true]{animation:nwa-pulse 1s ease-in-out infinite}
-    .settings-toggle{width:32px;height:28px;padding:0;border-radius:7px 0 0 7px;border:1px solid #3b6046;border-right:0;
-      background:#193322;color:#c6e7cd;font-size:19px;line-height:1;box-shadow:0 3px 12px #0004}
-    .settings-toggle:hover:not(:disabled){background:#284c34}
+    .settings-toggle{display:grid;place-items:center;width:24px;height:24px;padding:0;border-radius:0 0 0 7px;border:0;
+      background:#008000;color:#fff;line-height:1;box-shadow:none}
+    .settings-toggle:hover:not(:disabled){background:#009000}
+    .settings-toggle svg{display:block;width:16px;height:16px;pointer-events:none}
     .quick-notice{position:absolute;right:60px;top:0;width:max-content;max-width:min(260px,calc(100vw - 76px));padding:9px 12px;
       border:1px solid #3b6046;border-radius:9px;background:#14291c;color:#e5f6e8;font-size:12px;box-shadow:0 4px 18px #0005}
     @keyframes nwa-pulse{50%{background:#13672a}}
@@ -79,7 +87,6 @@ function mountTargetList() {
     @media(max-width:480px){.panel{top:8px;right:60px;width:calc(100vw - 68px);max-height:calc(100dvh - 16px)}
       .scroll{padding:14px}.toolbar{grid-template-columns:1fr}.statgrid{grid-template-columns:repeat(2,1fr)}
       .metrics{grid-template-columns:1fr 1fr}.cardhead{flex-wrap:wrap}.badge{white-space:normal}.actions{gap:8px}.header{padding:12px 14px}.suggestionfields{grid-template-columns:1fr}}
-    @media(pointer:coarse){.launcher{height:44px}.settings-toggle{width:36px;height:36px}}
   `;
   root.append(css);
   function element(tag, text, className) {
@@ -99,7 +106,7 @@ function mountTargetList() {
   const panel = element('section', null, 'panel'); panel.hidden = true;
   panel.id = 'nwa-panel'; panel.setAttribute('aria-label', 'North West Alliance target finder');
   const header = element('div', null, 'header');
-  const title = element('div'); title.append(element('div', 'NWA Target Finder', 'eyebrow'), element('h2', 'North West Alliance'));
+  const title = element('div'); title.append(element('div', `NWA Target Finder · v${CONFIG.version}`, 'eyebrow'), element('h2', 'North West Alliance'));
   header.append(title, button('×', () => toggle(false), 'icon'));
   header.lastChild.setAttribute('aria-label', 'Close NWA settings');
   const scroll = element('div', null, 'scroll');
@@ -108,7 +115,16 @@ function mountTargetList() {
   const dock = element('div', null, 'dock');
   const launcher = button('NWA', () => void findTarget(), 'launcher');
   launcher.setAttribute('aria-label', 'NWA — find a target'); launcher.title = 'North West Alliance — find a target';
-  const settings = button('⚙', () => { state.findAfterLogin = false; cancelFind(); toggle(!state.open); }, 'settings-toggle');
+  const settings = button('', () => { state.findAfterLogin = false; cancelFind(); toggle(!state.open); }, 'settings-toggle');
+  const gear = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  gear.setAttribute('viewBox', '0 0 24 24'); gear.setAttribute('aria-hidden', 'true'); gear.setAttribute('focusable', 'false');
+  gear.setAttribute('fill', 'none'); gear.setAttribute('stroke', '#fff'); gear.setAttribute('stroke-width', '1.8');
+  gear.setAttribute('stroke-linejoin', 'round');
+  const teeth = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  teeth.setAttribute('d', 'M10 2h4l.4 2.4 1.8.8 2-1.4 2 2-1.4 2 .8 1.8L22 10v4l-2.4.4-.8 1.8 1.4 2-2 2-2-1.4-1.8.8L14 22h-4l-.4-2.4-1.8-.8-2 1.4-2-2 1.4-2-.8-1.8L2 14v-4l2.4-.4.8-1.8-1.4-2 2-2 2 1.4 1.8-.8Z');
+  const center = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  center.setAttribute('cx', '12'); center.setAttribute('cy', '12'); center.setAttribute('r', '3');
+  gear.append(teeth, center); settings.append(gear);
   settings.setAttribute('aria-label', 'NWA settings'); settings.setAttribute('aria-controls', panel.id);
   settings.setAttribute('aria-expanded', 'false'); settings.title = 'NWA settings';
   const quickNotice = element('div', null, 'quick-notice'); quickNotice.setAttribute('role', 'status'); quickNotice.hidden = true;

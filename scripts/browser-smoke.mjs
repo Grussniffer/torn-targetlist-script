@@ -12,7 +12,23 @@ const executablePath = process.env.TARGETLIST_BROWSER_PATH || chromium.executabl
 if (!existsSync(executablePath)) {
   throw new Error('No Chromium browser found. Run npx playwright install chromium, or set TARGETLIST_BROWSER_PATH to an installed compatible browser.');
 }
-const source = `${await readFile(path.join(workspace, 'src/core.js'), 'utf8')}\n${await readFile(path.join(workspace, 'src/app.js'), 'utf8')}`;
+// Exercise the actual installable bundle, including its wrapper and mount guard.
+const source = await readFile(path.join(workspace, 'dist/torn-targetlist.user.js'), 'utf8');
+const scriptVersion = source.match(/^\/\/ @version\s+(.+)$/m)?.[1]?.trim();
+assert(scriptVersion, 'Installable script is missing a version');
+const legacySource = `(() => {
+  if (document.getElementById('torn-targetlist-host')) return;
+  const host = document.createElement('div');
+  host.id = 'torn-targetlist-host';
+  host.style.cssText = 'position:fixed;bottom:18px;right:18px;z-index:2147483000;';
+  document.body.append(host);
+  const root = host.attachShadow({ mode: 'closed' });
+  const style = document.createElement('style');
+  style.textContent = '.launcher{padding:8px 12px;background:#76e1c7;color:#102626;border:0;border-radius:9px}';
+  const launcher = document.createElement('button');
+  launcher.className = 'launcher'; launcher.textContent = '◎ Target list';
+  root.append(style, launcher);
+})();`;
 const artifacts = path.join(workspace, 'artifacts');
 await mkdir(artifacts, { recursive: true });
 const browser = await chromium.launch({ executablePath, headless: true });
@@ -21,12 +37,12 @@ let networkRequests = 0;
 await context.route('**/*', route => { networkRequests++; return route.abort(); });
 const pageErrors = [];
 
-async function mount(viewport = { width: 1280, height: 960 }) {
-  const page = await context.newPage();
+async function mount(viewport = { width: 1280, height: 960 }, scripts = [source], pageContext = context) {
+  const page = await pageContext.newPage();
   await page.setViewportSize(viewport);
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.goto('about:blank');
-  await page.setContent(`<!doctype html><html lang="en"><head><title>NWA mock browser check</title>
+  await page.setContent(`<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>NWA mock browser check</title>
     <style>body{margin:0;background:#0c141c;color:#c0cdd5;font-family:system-ui,sans-serif}.mock{position:fixed;top:20px;left:20px;max-width:calc(100vw - 40px)}h1{font-size:20px;margin:0 0 8px}p{font-size:13px;max-width:360px;line-height:1.5}</style>
     </head><body><div class="mock"><h1>MOCK API DATA</h1><p>Browser validation preview. Fictional player names, faction, battle stats and statuses. No live Torn or FFScouter requests.</p></div>
     <div style="position:fixed;top:3px;right:18px;z-index:2147483647;font-size:10px;letter-spacing:1px;color:#f6d290">MOCK API DATA</div></body></html>`);
@@ -58,7 +74,8 @@ async function mount(viewport = { width: 1280, height: 960 }) {
       targetName: 'Mock Suggested Player', comment: 'A mock reason for adding this target.', status: 'pending',
       suggestedBy: { id: player.id, name: player.name, faction: player.faction }, createdAt: new Date(Date.now()).toISOString(),
       reviewedBy: null, reviewedAt: null }];
-    window.__mock = { requests: [], pending: [], holds: [], overrides: {}, player, targets, store, suggestions, canReview: false };
+    window.__mock = { requests: [], pending: [], holds: [], overrides: {}, player, targets, store, suggestions,
+      canReview: false, serviceOrigin: 'https://targetlist.grusmedia.no' };
     window.GM_getValue = (key, fallback) => store.has(key) ? store.get(key) : fallback;
     window.GM_setValue = (key, value) => store.set(key, value);
     window.GM_deleteValue = key => store.delete(key);
@@ -121,7 +138,7 @@ async function mount(viewport = { width: 1280, height: 960 }) {
       for (const request of pending) respond(request);
     };
   });
-  await page.addScriptTag({ content: `${source}\nwindow.__mock.serviceOrigin = new URL(CONFIG.serviceUrl).origin;` });
+  for (const script of scripts) await page.addScriptTag({ content: script });
   return page;
 }
 
@@ -189,32 +206,83 @@ async function assertDock(page) {
     const root = window.__targetlistShadow;
     const launcher = root.querySelector('.launcher');
     const gear = root.querySelector('.settings-toggle');
+    const svg = gear.querySelector('svg');
     const rect = node => {
       const { left, right, top, bottom, width, height } = node.getBoundingClientRect();
       return { left, right, top, bottom, width, height };
     };
+    const launcherStyle = getComputedStyle(launcher);
     return { launcher: rect(launcher), gear: rect(gear), label: launcher.textContent,
-      color: getComputedStyle(launcher).backgroundColor, gearLabel: gear.getAttribute('aria-label'),
+      color: launcherStyle.backgroundColor, textColor: launcherStyle.color,
+      fontSize: launcherStyle.fontSize, fontWeight: launcherStyle.fontWeight, fontFamily: launcherStyle.fontFamily,
+      gearColor: getComputedStyle(gear).backgroundColor, gearLabel: gear.getAttribute('aria-label'),
+      svg: svg ? { ...rect(svg), namespace: svg.namespaceURI,
+        visible: getComputedStyle(svg).visibility === 'visible' && getComputedStyle(svg).display !== 'none',
+        whitePaint: [...svg.querySelectorAll('path')].some(path => ['fill', 'stroke']
+          .some(property => getComputedStyle(path)[property] === 'rgb(255, 255, 255)')) } : null,
+      version: document.getElementById('torn-targetlist-host').getAttribute('data-nwa-version'),
       width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth };
   });
   assert.equal(geometry.label, 'NWA');
-  const channels = geometry.color.match(/[\d.]+/g).map(Number);
-  assert(channels[1] > channels[0] && channels[1] > channels[2], JSON.stringify(geometry));
-  assert(geometry.launcher.width >= 35 && geometry.launcher.width <= 72, JSON.stringify(geometry));
-  assert(geometry.launcher.height >= 22 && geometry.launcher.height <= 48, JSON.stringify(geometry));
+  assert.equal(geometry.version, scriptVersion);
+  assert.equal(geometry.color, 'rgb(0, 128, 0)');
+  assert.equal(geometry.textColor, 'rgb(255, 255, 255)');
+  assert.equal(geometry.fontSize, '14px');
+  assert.equal(geometry.fontWeight, '400');
+  assert.match(geometry.fontFamily, /Arial/);
+  assert.equal(geometry.launcher.width, 40);
+  assert.equal(geometry.launcher.height, 30);
   assert(Math.abs(geometry.launcher.right - geometry.width) <= 1, JSON.stringify(geometry));
-  assert(geometry.gear.top >= geometry.launcher.bottom && geometry.gear.top <= geometry.launcher.bottom + 8,
-    JSON.stringify(geometry));
-  assert(geometry.gear.width <= geometry.launcher.width && geometry.gear.height <= geometry.launcher.height,
-    JSON.stringify(geometry));
+  assert(Math.abs(geometry.launcher.top - geometry.height * 0.17) <= 1, JSON.stringify(geometry));
+  assert.equal(geometry.gear.top, geometry.launcher.bottom);
+  assert.equal(geometry.gear.width, 24);
+  assert.equal(geometry.gear.height, 24);
+  assert.equal(geometry.gearColor, 'rgb(0, 128, 0)');
+  assert(Math.abs(geometry.gear.right - geometry.width) <= 1, JSON.stringify(geometry));
   assert(geometry.gear.left >= geometry.launcher.left && geometry.gear.right <= geometry.width + 1,
     JSON.stringify(geometry));
   assert(geometry.launcher.top >= 0 && geometry.gear.bottom <= geometry.height, JSON.stringify(geometry));
+  assert(geometry.svg, 'Settings button has no SVG gear');
+  assert.equal(geometry.svg.namespace, 'http://www.w3.org/2000/svg');
+  assert.equal(geometry.svg.width, 16);
+  assert.equal(geometry.svg.height, 16);
+  assert.equal(geometry.svg.visible, true);
+  assert.equal(geometry.svg.whitePaint, true);
   assert.match(geometry.gearLabel, /settings/i);
   assert(geometry.documentWidth <= geometry.width, JSON.stringify(geometry));
 }
 
 try {
+  const legacyFirst = await mount(undefined, [legacySource]);
+  assert.equal(await shadow(legacyFirst, '.launcher', 'text'), '◎ Target list');
+  await legacyFirst.addScriptTag({ content: source });
+  await assertDock(legacyFirst);
+  assert.equal(await legacyFirst.evaluate(() => document.querySelectorAll('#torn-targetlist-host').length), 1);
+  assert.equal(await legacyFirst.evaluate(() => window.__targetlistShadow.querySelectorAll('.launcher').length), 1);
+  await legacyFirst.close();
+
+  const latestFirst = await mount();
+  await latestFirst.evaluate(() => { window.__firstNwaHost = document.getElementById('torn-targetlist-host'); });
+  await latestFirst.addScriptTag({ content: legacySource });
+  await assertDock(latestFirst);
+  await latestFirst.addScriptTag({ content: source });
+  await assertDock(latestFirst);
+  assert.equal(await latestFirst.evaluate(() => document.querySelectorAll('#torn-targetlist-host').length), 1);
+  assert.equal(await latestFirst.evaluate(() => document.getElementById('torn-targetlist-host') === window.__firstNwaHost), true);
+  assert.equal(await latestFirst.evaluate(() => window.__targetlistShadow.querySelectorAll('.launcher,.settings-toggle').length), 2);
+  await latestFirst.close();
+  console.log('PASS actual installable bundle replaces the old Target list host, survives reverse load order, and mounts once per version');
+
+  const touchContext = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  try {
+    await touchContext.route('**/*', route => { networkRequests++; return route.abort(); });
+    const touch = await mount({ width: 390, height: 844 }, [source], touchContext);
+    assert.equal(await touch.evaluate(() => matchMedia('(pointer:coarse)').matches), true);
+    await assertDock(touch);
+    await touch.close();
+  } finally { await touchContext.close(); }
+  console.log('PASS compact NWA button and visible SVG gear retain the same dimensions on touch devices');
+
   const dock = await mount();
   await assertDock(dock);
   await dock.screenshot({ path: path.join(artifacts, 'browser-nwa-launcher-desktop.png'), fullPage: true });
