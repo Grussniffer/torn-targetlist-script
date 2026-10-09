@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Faction Target List
+// @name         NWA Target Finder
 // @namespace    torn-faction-targetlist
-// @version      0.2.1
-// @description  Find and suggest chain targets.
+// @version      0.3.0
+// @description  North West Alliance chain targets.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
 // @grant        GM_xmlhttpRequest
@@ -92,16 +92,22 @@ function mountTargetList() {
   const C = TargetListCore;
   let base;
   try { base = C.serviceUrl(CONFIG.serviceUrl); }
-  catch (error) { console.error('[Target List] Invalid service address:', error.message); return; }
+  catch (error) { console.error('[NWA] Invalid service address:', error.message); return; }
   const storageKey = `targetlist.session.${base}`;
+  const preferencesKey = `targetlist.preferences.${base}`;
+  const preferences = GM_getValue(preferencesKey, null);
+  const savedRatio = preferences?.maxRatio;
   const host = document.createElement('div');
   host.id = 'torn-targetlist-host';
-  host.style.cssText = 'position:fixed;bottom:18px;right:18px;z-index:2147483000;';
+  host.style.cssText = 'position:fixed;inset:0;z-index:2147483000;pointer-events:none;';
   document.body.append(host);
   const root = host.attachShadow({ mode: 'closed' });
   const state = {
-    token: null, expiresAt: null, player: null, targets: [], warnings: [], generatedAt: null,
-    busy: false, open: false, generation: 0, error: '', query: '', mode: 'all', maxRatio: C.DEFAULT_MAX_RATIO,
+    token: null, expiresAt: null, player: null, targets: [], warnings: [], generatedAt: null, poolLoadedAt: 0,
+    busy: false, open: false, generation: 0, error: '', query: '', mode: 'all',
+    maxRatio: Number.isFinite(savedRatio) && savedRatio >= 0.01 && savedRatio <= 5 ? savedRatio : C.DEFAULT_MAX_RATIO,
+    lastTargetId: Number.isSafeInteger(preferences?.lastTargetId) ? preferences.lastTargetId : null,
+    finding: false, findGeneration: 0, findAfterLogin: false,
     pendingChecks: new Set(), loading: false, targetGeneration: 0, view: 'targets',
     suggestionView: 'pending', suggestions: [], nextSuggestionOffset: null, canReview: false,
     suggestionsLoading: false, suggestionGeneration: 0, suggestionMutation: null, suggestionNotice: '',
@@ -116,13 +122,24 @@ function mountTargetList() {
     a{color:#7fe0ce;text-decoration:none}a:hover{text-decoration:underline}p{margin:0 0 12px}h2,h3{margin:0}
     input,select,textarea{color:#edf4f4;background:#101c24;border:1px solid #3d505b;border-radius:8px;padding:10px;min-width:0}
     input:focus,select:focus,textarea:focus{border-color:#69d7c0}label{display:block}small,.muted{color:#a8b9c2;font-size:12px}
-    .launcher{background:#76e1c7;color:#102626;border:0;font-weight:750;box-shadow:0 3px 25px #0006}
-    .panel{width:min(640px,calc(100vw - 36px));max-height:calc(100dvh - 88px);background:#14222d;border:1px solid #354956;
-      border-radius:15px;box-shadow:0 18px 70px #0009;display:flex;flex-direction:column;margin-bottom:10px;overflow:hidden}
+    .dock{position:absolute;right:0;top:18vh;display:flex;flex-direction:column;align-items:flex-end;gap:3px;pointer-events:auto}
+    .launcher{width:52px;height:36px;padding:0;border:0;border-radius:8px 0 0 8px;background:#078826;color:#fff;font-size:13px;
+      font-weight:800;letter-spacing:.5px;box-shadow:0 3px 15px #0005}.launcher:hover:not(:disabled){background:#0a9e30}
+    .launcher[aria-busy=true]{animation:nwa-pulse 1s ease-in-out infinite}
+    .settings-toggle{width:32px;height:28px;padding:0;border-radius:7px 0 0 7px;border:1px solid #3b6046;border-right:0;
+      background:#193322;color:#c6e7cd;font-size:19px;line-height:1;box-shadow:0 3px 12px #0004}
+    .settings-toggle:hover:not(:disabled){background:#284c34}
+    .quick-notice{position:absolute;right:60px;top:0;width:max-content;max-width:min(260px,calc(100vw - 76px));padding:9px 12px;
+      border:1px solid #3b6046;border-radius:9px;background:#14291c;color:#e5f6e8;font-size:12px;box-shadow:0 4px 18px #0005}
+    @keyframes nwa-pulse{50%{background:#13672a}}
+    @media(prefers-reduced-motion:reduce){.launcher[aria-busy=true]{animation:none}}
+    .panel{position:absolute;top:12px;right:64px;width:min(640px,calc(100vw - 80px));max-height:calc(100dvh - 24px);
+      pointer-events:auto;background:#14222d;border:1px solid #354956;
+      border-radius:15px;box-shadow:0 18px 70px #0009;display:flex;flex-direction:column;overflow:hidden}
     [hidden]{display:none!important}.header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #30414c}
     .eyebrow{font-size:10px;letter-spacing:1.8px;font-weight:750;color:#76e1c7;text-transform:uppercase}
     h2{font-size:20px;line-height:1.4}.icon{padding:3px 10px;background:transparent;font-size:20px}
-    .scroll{overflow:auto;padding:20px}.login{display:grid;gap:13px}.login input{width:100%;margin-top:5px}
+    .scroll{overflow:auto;min-height:0;padding:20px}.login{display:grid;gap:13px}.login input{width:100%;margin-top:5px}
     .primary{background:#76e1c7;color:#102626;font-weight:750;border:0}.primary:hover:not(:disabled){background:#95efd9}
     .notice{font-size:12px;line-height:1.6;color:#b4c3ca}.error{background:#492b31;color:#ffd6d8;padding:10px 13px;border-radius:8px;margin-bottom:14px}
     .profile{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.profile strong{font-size:17px}
@@ -142,8 +159,10 @@ function mountTargetList() {
     .success{background:#20473e;color:#baf8e7;padding:10px 13px;border-radius:8px;margin:12px 0;font-size:13px}
     .comment{white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0;font-size:13px;color:#d4e4e9}.queueheader{display:flex;align-items:center;justify-content:space-between;gap:10px}
     .queueheader h3{font-size:16px}.queuefooter{margin-top:12px}.suggestioncard .actions button{padding:6px 10px}.suggestioncard .name{overflow-wrap:anywhere}
-    @media(max-width:480px){.scroll{padding:14px}.toolbar{grid-template-columns:1fr}.statgrid{grid-template-columns:repeat(2,1fr)}
+    @media(max-width:480px){.panel{top:8px;right:60px;width:calc(100vw - 68px);max-height:calc(100dvh - 16px)}
+      .scroll{padding:14px}.toolbar{grid-template-columns:1fr}.statgrid{grid-template-columns:repeat(2,1fr)}
       .metrics{grid-template-columns:1fr 1fr}.cardhead{flex-wrap:wrap}.badge{white-space:normal}.actions{gap:8px}.header{padding:12px 14px}.suggestionfields{grid-template-columns:1fr}}
+    @media(pointer:coarse){.launcher{height:44px}.settings-toggle{width:36px;height:36px}}
   `;
   root.append(css);
   function element(tag, text, className) {
@@ -161,23 +180,37 @@ function mountTargetList() {
     node.target = '_blank'; node.rel = 'noopener noreferrer'; return node;
   }
   const panel = element('section', null, 'panel'); panel.hidden = true;
-  panel.setAttribute('aria-label', 'Faction target list');
+  panel.id = 'nwa-panel'; panel.setAttribute('aria-label', 'North West Alliance target finder');
   const header = element('div', null, 'header');
-  const title = element('div'); title.append(element('div', 'Faction target list', 'eyebrow'), element('h2', 'Find your next hit'));
+  const title = element('div'); title.append(element('div', 'NWA Target Finder', 'eyebrow'), element('h2', 'North West Alliance'));
   header.append(title, button('×', () => toggle(false), 'icon'));
-  header.lastChild.setAttribute('aria-label', 'Close target list');
+  header.lastChild.setAttribute('aria-label', 'Close NWA settings');
   const scroll = element('div', null, 'scroll');
   const errorBox = element('div', null, 'error'); errorBox.setAttribute('role', 'alert'); errorBox.hidden = true;
   const content = element('div'); scroll.append(errorBox, content); panel.append(header, scroll);
-  const launcher = button('◎ Target list', () => toggle(!state.open), 'launcher');
-  launcher.setAttribute('aria-expanded', 'false'); root.append(panel, launcher);
+  const dock = element('div', null, 'dock');
+  const launcher = button('NWA', () => void findTarget(), 'launcher');
+  launcher.setAttribute('aria-label', 'NWA — find a target'); launcher.title = 'North West Alliance — find a target';
+  const settings = button('⚙', () => { state.findAfterLogin = false; cancelFind(); toggle(!state.open); }, 'settings-toggle');
+  settings.setAttribute('aria-label', 'NWA settings'); settings.setAttribute('aria-controls', panel.id);
+  settings.setAttribute('aria-expanded', 'false'); settings.title = 'NWA settings';
+  const quickNotice = element('div', null, 'quick-notice'); quickNotice.setAttribute('role', 'status'); quickNotice.hidden = true;
+  dock.append(launcher, settings, quickNotice); root.append(panel, dock);
 
   function message(text) { state.error = text; errorBox.textContent = text; errorBox.hidden = !text; }
+  function findNotice(text) { quickNotice.textContent = text; quickNotice.hidden = !text; }
+  function updateLauncher() {
+    launcher.disabled = state.finding || state.busy || state.loading;
+    launcher.setAttribute('aria-busy', String(state.finding));
+  }
+  function cancelFind() { state.findGeneration++; state.finding = false; findNotice(''); updateLauncher(); }
+  function savePreferences() { GM_setValue(preferencesKey, { maxRatio: state.maxRatio, lastTargetId: state.lastTargetId }); }
   function saveSession() {
     GM_setValue(storageKey, { token: state.token, expiresAt: state.expiresAt });
   }
   function clearSession() {
-    state.generation++; state.token = null; state.player = null; state.targets = []; state.warnings = [];
+    cancelFind(); state.findAfterLogin = false;
+    state.generation++; state.token = null; state.player = null; state.targets = []; state.warnings = []; state.poolLoadedAt = 0;
     state.pendingChecks.clear(); state.busy = false; state.loading = false; state.targetGeneration++; state.expiresAt = null;
     state.view = 'targets'; state.suggestionView = 'pending'; state.suggestions = []; state.nextSuggestionOffset = null;
     state.canReview = false; state.suggestionsLoading = false; state.suggestionGeneration++;
@@ -187,7 +220,7 @@ function mountTargetList() {
   function handleError(error) {
     if (error.code === 'REVIEW_NOT_ALLOWED') state.canReview = false;
     if (['SESSION_EXPIRED', 'UNAUTHORIZED', 'FACTION_NOT_ALLOWED', 'FACTION_CHANGED', 'INVALID_KEY', 'KEY_ACCESS', 'SESSION_REVOKED', 'KEY_REVOKED', 'INVALID_SESSION', 'FORBIDDEN'].includes(error.code) || error.status === 401 || (error.status === 403 && !['FRIENDLY_TARGET', 'REVIEW_NOT_ALLOWED'].includes(error.code))) {
-      clearSession(); render();
+      clearSession(); toggle(true); render();
     }
     message(error.message || 'The request failed. Try again shortly.');
   }
@@ -237,15 +270,23 @@ function mountTargetList() {
       state.token = data.token; state.expiresAt = data.expiresAt; state.player = data.player;
       saveSession(); await loadTargets();
     } catch (error) { if (generation === state.generation) handleError(error); }
-    finally { if (generation === state.generation) { state.busy = false; render(); } }
+    finally {
+      if (generation === state.generation) {
+        state.busy = false; render();
+        if (state.findAfterLogin && state.player && !state.error) {
+          state.findAfterLogin = false; void findTarget();
+        }
+      }
+    }
   }
 
   async function logout() {
     const token = state.token; clearSession(); message(''); render();
     if (token) { try { await request('DELETE', '/api/session', undefined, token); } catch { /* Local credentials are cleared regardless. */ } }
   }
-  async function loadTargets(force = false) {
-    if (!state.token || (state.loading && !force)) return;
+  async function loadTargets(force = false, forFind = false) {
+    if (!state.token || (state.loading && !force)) return false;
+    if (!forFind) cancelFind();
     const generation = state.generation;
     const targetGeneration = ++state.targetGeneration;
     state.loading = true; message('');
@@ -255,8 +296,79 @@ function mountTargetList() {
       const data = await request('GET', '/api/targets');
       if (generation !== state.generation || targetGeneration !== state.targetGeneration) return;
       state.player = data.player; state.targets = data.targets; state.warnings = data.warnings || []; state.generatedAt = data.generatedAt;
+      state.poolLoadedAt = Date.now();
+      return true;
     } catch (error) { if (generation === state.generation && targetGeneration === state.targetGeneration) handleError(error); }
     finally { if (generation === state.generation && targetGeneration === state.targetGeneration) { state.loading = false; render(); } }
+  }
+  async function findTarget() {
+    if (state.finding || state.busy || state.loading) return;
+    message('');
+    if (!state.token || Date.parse(state.expiresAt) <= Date.now()) {
+      if (state.token) clearSession();
+      state.findAfterLogin = true; toggle(true); render(); return;
+    }
+    state.finding = true; updateLauncher(); findNotice('Finding a target…');
+    const findGeneration = ++state.findGeneration;
+    const generation = state.generation;
+    let targetGeneration = state.targetGeneration;
+    const current = () => state.finding && findGeneration === state.findGeneration && generation === state.generation
+      && targetGeneration === state.targetGeneration && state.token && Date.parse(state.expiresAt) > Date.now();
+    try {
+      if (!state.player || Date.now() - state.poolLoadedAt >= 30000
+          || !C.select(state.targets, state.player, { ...state, mode: 'suggested' }).length) {
+        const restored = await loadTargets(false, true);
+        targetGeneration = state.targetGeneration;
+        if (!restored || !current()) {
+          if (findGeneration === state.findGeneration && state.error) findNotice(state.error);
+          return;
+        }
+      }
+      const matches = C.select(state.targets, state.player, { ...state, mode: 'suggested' });
+      const candidates = matches.filter(row => !row.assessment.live || row.assessment.ready)
+        .map(row => row.target).sort((a, b) => Number(a.id === state.lastTargetId) - Number(b.id === state.lastTargetId));
+      const limit = Math.min(candidates.length, 5);
+      for (let index = 0; index < limit; index++) {
+        if (!current()) return;
+        const target = candidates[index];
+        findNotice(`Checking ${target.name || 'player'}…`);
+        let checked;
+        try { checked = await request('GET', `/api/targets/${target.id}/status`); }
+        catch (error) {
+          if (!current()) return;
+          state.targets = state.targets.map(row => row.id === target.id ? { ...row, checkedAt: null } : row);
+          if (['FRIENDLY_TARGET', 'TARGET_NOT_FOUND'].includes(error.code)) {
+            state.targets = state.targets.filter(row => row.id !== target.id); continue;
+          }
+          throw error;
+        }
+        if (!current()) return;
+        if (checked?.id !== target.id) throw new Error('NWA could not verify this target. Try again.');
+        state.targets = state.targets.map(row => row.id === target.id ? { ...row, ...checked } : row);
+        const latest = state.targets.find(row => row.id === target.id);
+        const assessment = latest && C.assess(latest, state.player, state.maxRatio);
+        if (!assessment?.suggested || !assessment.ready) continue;
+        state.lastTargetId = target.id; savePreferences();
+        findNotice(`Opening ${latest.name || 'target'}…`);
+        window.location.assign(`https://www.torn.com/loader.php?sid=attack&user2ID=${target.id}`);
+        return;
+      }
+      const notice = !state.targets.length ? 'The NWA target pool is empty. Suggest targets in settings.'
+        : !matches.length ? 'No targets match your filters and stat limit. Adjust them in settings.'
+        : candidates.length > limit ? 'No available target in the first 5 matches. Try NWA again or browse settings.'
+        : 'No matching targets are available right now. Try again shortly.';
+      findNotice(notice);
+    } catch (error) {
+      if (current()) { handleError(error); findNotice(error.message || 'NWA could not find a target. Try again.'); }
+    } finally {
+      if (findGeneration === state.findGeneration) {
+        state.finding = false;
+        if (state.token && Date.parse(state.expiresAt) <= Date.now()) {
+          clearSession(); message('Session expired. Sign in again.'); findNotice('Session expired. Open NWA settings to sign in again.');
+        }
+        render();
+      }
+    }
   }
   async function checkStatus(id) {
     if (state.pendingChecks.has(id)) return;
@@ -343,9 +455,10 @@ function mountTargetList() {
 
   let cardContainer, countNode;
   function render() {
+    updateLauncher();
     content.replaceChildren(); cardContainer = null; countNode = null;
     if (!state.player) {
-      const intro = element('p', 'Find chain targets that match your stats.');
+      const intro = element('p', 'Sign in to find your next NWA chain target.');
       const form = element('form', null, 'login');
       const label = element('label', 'Torn Limited API key');
       const input = element('input'); input.type = 'password'; input.maxLength = 16;
@@ -362,7 +475,7 @@ function mountTargetList() {
     const profile = element('div', null, 'profile'); const identity = element('div');
     identity.append(element('strong', `${player.name} [${player.id}]`), element('div', `${player.faction.name} · Faction ${player.faction.id}`, 'muted'));
     profile.append(identity, button('Sign out', () => void logout())); content.append(profile);
-    const tabs = element('div', null, 'tabs'); tabs.setAttribute('aria-label', 'Target list sections');
+    const tabs = element('div', null, 'tabs'); tabs.setAttribute('aria-label', 'NWA sections');
     for (const [view, label] of [['targets', 'Targets'], ['suggestions', 'Suggestions']]) {
       const tab = button(label, () => {
         if (state.view === view) return;
@@ -381,7 +494,7 @@ function mountTargetList() {
     content.append(grid);
     const toolbar = element('div', null, 'toolbar');
     const query = element('input'); query.type = 'search'; query.placeholder = 'Search player, faction or notes'; query.value = state.query;
-    query.setAttribute('aria-label', 'Search targets'); query.addEventListener('input', () => { state.query = query.value; renderCards(); });
+    query.setAttribute('aria-label', 'Search targets'); query.addEventListener('input', () => { state.query = query.value; cancelFind(); renderCards(); });
     const mode = element('select'); mode.setAttribute('aria-label', 'Target view');
     for (const [value, label] of [['all', 'All targets'], ['suggested', 'Possible matches']]) {
       const option = element('option', label); option.value = value; mode.append(option);
@@ -394,7 +507,7 @@ function mountTargetList() {
     ratio.addEventListener('change', () => {
       const value = Number(ratio.value);
       state.maxRatio = Number.isFinite(value) && value >= 1 && value <= 500 ? value / 100 : C.DEFAULT_MAX_RATIO;
-      ratio.value = String(Math.round(state.maxRatio * 100)); renderCards();
+      savePreferences(); cancelFind(); ratio.value = String(Math.round(state.maxRatio * 100)); renderCards();
     });
     ratioLabel.append(ratio, element('span', '% of yours')); controls.append(ratioLabel);
     const refresh = button(state.loading ? 'Loading…' : 'Refresh list', () => void loadTargets()); refresh.disabled = state.loading; controls.append(refresh); content.append(controls);
@@ -507,8 +620,9 @@ function mountTargetList() {
   }
 
   function toggle(open) {
-    state.open = open; panel.hidden = !open; launcher.setAttribute('aria-expanded', String(open));
-    if (open && state.token && !state.player) void loadTargets();
+    state.open = open; panel.hidden = !open; settings.setAttribute('aria-expanded', String(open));
+    if (open) findNotice('');
+    if (open && state.token && !state.player && !state.finding) void loadTargets();
   }
   const saved = GM_getValue(storageKey, null);
   if (saved?.token && Date.parse(saved.expiresAt) > Date.now()) {

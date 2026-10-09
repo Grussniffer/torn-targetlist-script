@@ -1,9 +1,9 @@
 {
   "name": "torn-targetlist-script",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Find and suggest chain targets in Torn",
+  "description": "North West Alliance chain target finder for Torn",
   "engines": { "node": ">=24" },
   "scripts": {
     "build": "node scripts/build.mjs",

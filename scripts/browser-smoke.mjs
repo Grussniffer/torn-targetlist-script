@@ -26,7 +26,7 @@ async function mount(viewport = { width: 1280, height: 960 }) {
   await page.setViewportSize(viewport);
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.goto('about:blank');
-  await page.setContent(`<!doctype html><html lang="en"><head><title>Target list mock browser check</title>
+  await page.setContent(`<!doctype html><html lang="en"><head><title>NWA mock browser check</title>
     <style>body{margin:0;background:#0c141c;color:#c0cdd5;font-family:system-ui,sans-serif}.mock{position:fixed;top:20px;left:20px;max-width:calc(100vw - 40px)}h1{font-size:20px;margin:0 0 8px}p{font-size:13px;max-width:360px;line-height:1.5}</style>
     </head><body><div class="mock"><h1>MOCK API DATA</h1><p>Browser validation preview. Fictional player names, faction, battle stats and statuses. No live Torn or FFScouter requests.</p></div>
     <div style="position:fixed;top:3px;right:18px;z-index:2147483647;font-size:10px;letter-spacing:1px;color:#f6d290">MOCK API DATA</div></body></html>`);
@@ -140,7 +140,7 @@ async function wait(page, expression) {
   await page.waitForFunction(expression, undefined, { timeout: 5000 });
 }
 async function login(page) {
-  await shadow(page, '.launcher', 'click');
+  await shadow(page, '.settings-toggle', 'click');
   await shadow(page, 'input[type=password]', 'fill', 'MockLimitedKey01');
   await shadow(page, 'form', 'submit');
   await wait(page, () => window.__targetlistShadow.querySelectorAll('.card').length === 4);
@@ -184,9 +184,92 @@ async function submitSuggestion(page) {
   await shadow(page, '.suggestionform', 'submit');
 }
 
+async function assertDock(page) {
+  const geometry = await page.evaluate(() => {
+    const root = window.__targetlistShadow;
+    const launcher = root.querySelector('.launcher');
+    const gear = root.querySelector('.settings-toggle');
+    const rect = node => {
+      const { left, right, top, bottom, width, height } = node.getBoundingClientRect();
+      return { left, right, top, bottom, width, height };
+    };
+    return { launcher: rect(launcher), gear: rect(gear), label: launcher.textContent,
+      color: getComputedStyle(launcher).backgroundColor, gearLabel: gear.getAttribute('aria-label'),
+      width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth };
+  });
+  assert.equal(geometry.label, 'NWA');
+  const channels = geometry.color.match(/[\d.]+/g).map(Number);
+  assert(channels[1] > channels[0] && channels[1] > channels[2], JSON.stringify(geometry));
+  assert(geometry.launcher.width >= 35 && geometry.launcher.width <= 72, JSON.stringify(geometry));
+  assert(geometry.launcher.height >= 22 && geometry.launcher.height <= 48, JSON.stringify(geometry));
+  assert(Math.abs(geometry.launcher.right - geometry.width) <= 1, JSON.stringify(geometry));
+  assert(geometry.gear.top >= geometry.launcher.bottom && geometry.gear.top <= geometry.launcher.bottom + 8,
+    JSON.stringify(geometry));
+  assert(geometry.gear.width <= geometry.launcher.width && geometry.gear.height <= geometry.launcher.height,
+    JSON.stringify(geometry));
+  assert(geometry.gear.left >= geometry.launcher.left && geometry.gear.right <= geometry.width + 1,
+    JSON.stringify(geometry));
+  assert(geometry.launcher.top >= 0 && geometry.gear.bottom <= geometry.height, JSON.stringify(geometry));
+  assert.match(geometry.gearLabel, /settings/i);
+  assert(geometry.documentWidth <= geometry.width, JSON.stringify(geometry));
+}
+
 try {
+  const dock = await mount();
+  await assertDock(dock);
+  await dock.screenshot({ path: path.join(artifacts, 'browser-nwa-launcher-desktop.png'), fullPage: true });
+  await dock.setViewportSize({ width: 390, height: 844 });
+  await assertDock(dock);
+  await dock.screenshot({ path: path.join(artifacts, 'browser-nwa-launcher-mobile.png'), fullPage: true });
+  await shadow(dock, '.launcher', 'click');
+  await wait(dock, () => Boolean(window.__targetlistShadow.querySelector('form.login')));
+  assert.match(await shadow(dock, '.header', 'text'), /NWA/);
+  assert.match(await shadow(dock, '.header', 'text'), /North West Alliance/);
+  assert.equal(await dock.evaluate(() => window.__mock.requests.length), 0);
+  await shadow(dock, '.settings-toggle', 'click');
+  await wait(dock, () => window.__targetlistShadow.querySelector('.panel').hidden);
+  await shadow(dock, '.settings-toggle', 'click');
+  await wait(dock, () => !window.__targetlistShadow.querySelector('.panel').hidden);
+  await dock.close();
+  console.log('PASS green NWA edge button, attached settings gear, desktop/mobile launcher screenshots, login without a session');
+
+  const quick = await mount();
+  await login(quick);
+  await shadow(quick, '.settings-toggle', 'click');
+  const attackUrl = 'https://www.torn.com/loader.php?sid=attack&user2ID=101';
+  let destination, statusRequests;
+  await quick.route(attackUrl, async route => {
+    // Fulfill this one destination locally; no Torn page or attack request is sent.
+    destination = { url: route.request().url(), navigation: route.request().isNavigationRequest(),
+      requests: statusRequests };
+    await route.fulfill({ status: 200, contentType: 'text/html',
+      body: '<!doctype html><title>Mock attack destination</title><h1>Mock destination only: no attack executed</h1>' });
+  });
+  await quick.evaluate(() => { window.__mock.holds.push('/api/targets/101/status'); });
+  const pagesBeforeFind = context.pages().length;
+  await shadow(quick, '.launcher', 'click');
+  await wait(quick, () => window.__mock.pending.length === 1);
+  assert.equal(quick.url(), 'about:blank');
+  assert.equal(destination, undefined);
+  assert.equal(await quick.evaluate(() => window.__targetlistShadow.querySelector('.launcher').disabled), true);
+  statusRequests = await quick.evaluate(() => structuredClone(window.__mock.requests));
+  const navigated = quick.waitForURL(attackUrl, { timeout: 5000 });
+  await quick.evaluate(() => window.__mock.release('/api/targets/101/status'));
+  await navigated;
+  assert.equal(context.pages().length, pagesBeforeFind);
+  assert.equal(destination.url, attackUrl);
+  assert.equal(destination.navigation, true);
+  assert.equal(destination.requests.at(-1).method, 'GET');
+  assert.equal(destination.requests.at(-1).path, '/api/targets/101/status');
+  assert.equal(await quick.locator('h1').textContent(), 'Mock destination only: no attack executed');
+  await quick.close();
+  console.log('PASS NWA waits for a live status check then opens the same-tab attack page, fulfilled entirely by a local mock');
+
   const main = await mount();
   await login(main);
+  await assertDock(main);
+  assert.match(await shadow(main, '.header', 'text'), /NWA/);
+  assert.match(await shadow(main, '.header', 'text'), /North West Alliance/);
   assert.match(await shadow(main, '.profile', 'text'), /MockChainer \[90001\].*Mock Allowed Faction/s);
   assert.match(await shadow(main, '.statgrid', 'text'), /Strength400K.*Defense250K.*Speed200K.*Dexterity150K/s);
   assert.match((await cardSnapshot(main, 103)).text, /Stats unknown.*Unknown/s);
@@ -219,10 +302,12 @@ try {
     const panel = window.__targetlistShadow.querySelector('.panel');
     const scroll = window.__targetlistShadow.querySelector('.scroll');
     const rect = panel.getBoundingClientRect();
-    return { left: rect.left, right: rect.right, width: innerWidth,
+    const launcher = window.__targetlistShadow.querySelector('.launcher').getBoundingClientRect();
+    return { left: rect.left, right: rect.right, dockLeft: launcher.left, width: innerWidth,
       documentWidth: document.documentElement.scrollWidth, scrollWidth: scroll.scrollWidth, clientWidth: scroll.clientWidth };
   });
   assert(mobileGeometry.left >= 0 && mobileGeometry.right <= mobileGeometry.width, JSON.stringify(mobileGeometry));
+  assert(mobileGeometry.right < mobileGeometry.dockLeft, JSON.stringify(mobileGeometry));
   assert(mobileGeometry.documentWidth <= mobileGeometry.width && mobileGeometry.scrollWidth <= mobileGeometry.clientWidth + 1,
     JSON.stringify(mobileGeometry));
   await main.screenshot({ path: path.join(artifacts, 'browser-mobile.png'), fullPage: true });
@@ -423,6 +508,7 @@ try {
   assert.deepEqual(pageErrors, [], 'Unhandled browser errors');
   console.log('All mocked browser smoke checks passed. No provider requests or live keys used.');
   console.log(`Mock screenshots: ${path.join(artifacts, 'browser-desktop.png')} and ${path.join(artifacts, 'browser-mobile.png')}`);
+  console.log(`Mock NWA launcher screenshots: ${path.join(artifacts, 'browser-nwa-launcher-desktop.png')} and ${path.join(artifacts, 'browser-nwa-launcher-mobile.png')}`);
   console.log(`Mock suggestion screenshots: ${path.join(artifacts, 'browser-suggestions-desktop.png')} and ${path.join(artifacts, 'browser-suggestions-mobile.png')}`);
 } finally {
   await context.close();

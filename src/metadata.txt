@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Faction Target List
+// @name         NWA Target Finder
 // @namespace    torn-faction-targetlist
-// @version      0.2.1
-// @description  Find and suggest chain targets.
+// @version      0.3.0
+// @description  North West Alliance chain targets.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
 // @grant        GM_xmlhttpRequest

@@ -1,10 +1,10 @@
-# Torn Target List
+# NWA Target Finder
 
-Find chain targets that match your stats.
+Find chain targets for **North West Alliance**.
 
 ## Install
 
-Open the [script](dist/torn-targetlist.user.js) and copy all its code. Sign into GitHub with access to this private repository first.
+Open the [script](dist/torn-targetlist.user.js) and copy all its code.
 
 ### Tampermonkey
 
@@ -17,14 +17,18 @@ On Chrome, enable **Allow User Scripts** in Tampermonkey's extension settings ([
 ### Torn PDA
 
 1. Open **Settings → Advanced Browser Settings** and turn on **Enable custom user scripts**.
-2. Open **Manage scripts**, tap **+**, name it **Torn Target List**, and paste the copied script into **Paste source code**.
+2. Open **Manage scripts**, tap **+**, name it **NWA Target Finder**, and paste the copied script into **Paste source code**.
 3. Leave **Injection time** at **END**, tap **Add**, make sure the script is enabled, and reload Torn inside PDA.
 
 Torn PDA still needs testing on a device.
 
 ## Start
 
-Open Torn, click **Target list** in the lower-right corner, and sign in with your **Limited Torn API key**.
+Open Torn and click the green **NWA** button on the right edge. Sign in with your **Limited Torn API key** the first time.
+
+NWA finds a target within your stat limit, checks availability, and opens its attack page. You start the attack yourself. If a target is unavailable, NWA tries another match, checking up to five per click.
+
+The small **⚙** underneath opens settings, the target list, and suggestions. Your stat limit is saved between pages.
 
 The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusmedia.no). You only need your Torn key.
 
@@ -36,3 +40,5 @@ The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusm
 - **Approvals:** faction leaders and co-leaders can approve or reject suggestions.
 
 Your key is sent to the backend and Torn for login and kept only for your session. Only allowed factions can use the list. Battle stats are estimates; attacks are manual.
+
+To update, replace the code in your existing userscript and save it.
