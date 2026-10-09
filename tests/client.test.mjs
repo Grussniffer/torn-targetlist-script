@@ -67,8 +67,8 @@ function textContent(element) {
 }
 async function flush() { for (let index = 0; index < 12; index++) await Promise.resolve(); }
 
-function fixture(saved = null, preferences = null, existingHost = null) {
-  let clock = NOW;
+function fixture(saved = null, preferences = null, existingHost = null, initialNow = NOW) {
+  let clock = initialNow;
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [clock])); } static now() { return clock; } }
   const body = new Element('body'); const requests = []; const navigations = []; const storage = new Map(); const writes = []; const timers = []; const timeouts = new Map();
   if (existingHost) body.append(existingHost);
@@ -202,6 +202,56 @@ test('a stored session verifies authorization before displaying any targets', as
   await flush();
   assert.equal(app.storage.size, 0);
   assert.match(app.text(), /Your faction is no longer allowed/);
+  assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
+});
+
+test('a seven-day saved session restores after 30 minutes and on day six without resending the API key', async () => {
+  const lifetime = 7 * 24 * 60 * 60 * 1000;
+  const expiresAt = new Date(NOW + lifetime).toISOString();
+  for (const age of [31 * 60 * 1000, 6 * 24 * 60 * 60 * 1000]) {
+    const restoredAt = NOW + age;
+    const app = fixture({ token: SESSION, expiresAt }, null, null, restoredAt);
+    assert.equal(app.requests.length, 0, 'restoring storage does not send an API key');
+    assert.equal(app.storage.get(app.storageKey).expiresAt, expiresAt);
+    assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
+    app.settings().emit('click');
+    assert.equal(app.requests.length, 1);
+    const authorization = app.requests[0];
+    assert.equal(authorization.method, 'GET');
+    assert.equal(authorization.url, `${serviceBase}/api/targets`);
+    assert.equal(authorization.headers.Authorization, `Bearer ${SESSION}`);
+    assert.equal(descendants(app.root).some(element => element.className === 'card'), false,
+      'a long-lived session must still authorize the player before showing targets');
+    app.response(authorization, { player, targets: [target], warnings: [] }); await flush();
+    assert.match(app.text(), /Target Player \[98765\]/);
+    app.button('NWA').emit('click');
+    const live = app.requests.at(-1);
+    assert.equal(live.url, `${serviceBase}/api/targets/${target.id}/status`);
+    assert.deepEqual(app.navigations, [], 'restored credentials do not bypass live status checks');
+    app.response(live, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(restoredAt).toISOString() });
+    await flush();
+    assert.deepEqual(app.navigations, [`https://www.torn.com/page.php?sid=attack&user2ID=${target.id}`]);
+    assert.equal(app.requests.some(request => request.method === 'POST' && request.url.endsWith('/api/session')), false);
+    assert.equal(JSON.stringify([...app.storage.values()]).includes(KEY), false);
+
+    const beforeExpiry = app.requests.length;
+    app.setNow(NOW + lifetime); app.timers[0]();
+    assert.equal(app.storage.has(app.storageKey), false, 'the seven-day deadline is not extended by use');
+    assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
+    assert.match(app.text(), /Session expired/);
+    app.button('NWA').emit('click'); await flush();
+    assert.equal(app.requests.length, beforeExpiry);
+    assert.match(app.text(), /Torn Limited API key/);
+  }
+});
+
+test('a seven-day token already at its deadline is cleared on reload before any authorization request', () => {
+  const deadline = NOW + 7 * 24 * 60 * 60 * 1000;
+  const app = fixture({ token: SESSION, expiresAt: new Date(deadline).toISOString() }, null, null, deadline);
+  assert.equal(app.storage.has(app.storageKey), false);
+  app.settings().emit('click');
+  assert.equal(app.requests.length, 0);
+  assert.match(app.text(), /Torn Limited API key/);
   assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
 });
 

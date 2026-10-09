@@ -50,6 +50,6 @@ The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusm
 - **Suggestions:** suggest a player or faction with a required comment.
 - **Approvals:** faction leaders and co-leaders can approve or reject suggestions.
 
-Your key is sent to the backend and Torn for login and kept only for your session. Only allowed factions can use the list. Battle stats are estimates; attacks are manual.
+Your key is sent to the backend and Torn for login and kept only in backend memory for your session. The script saves a session token so you can stay signed in for up to **7 days**. A backend restart requires signing in again. Only allowed factions can use the list. Battle stats are estimates; attacks are manual.
 
 Disable any separate old **Torn Faction Target List** entry. Your installed version appears in the settings header.
