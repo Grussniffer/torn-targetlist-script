@@ -39,7 +39,7 @@ The small **⚙** underneath opens settings, the target list, and suggestions. Y
 
 <img src="docs/images/nwa-controls.png" width="720" alt="Actual NWA controls with arrows: NWA finds a target and the gear underneath opens settings">
 
-<img src="docs/images/nwa-login.png" width="720" alt="Actual NWA sign-in panel: enter your Limited Torn API key and tap Sign in">
+<img src="docs/images/nwa-login.png" width="720" alt="Actual NWA sign-in panel: read the key storage notice, enter your Limited Torn API key and tap Sign in and save key">
 
 The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusmedia.no). You only need your Torn key.
 
@@ -50,7 +50,7 @@ The backend is already set to [targetlist.grusmedia.no](https://targetlist.grusm
 - **Suggestions:** suggest a player or faction with a required comment.
 - **Approvals:** faction leaders and co-leaders can approve or reject suggestions.
 
-Your key is sent to the backend and Torn and kept only in backend memory. While NWA is recently active, it also helps refresh target availability every **30 seconds**, within a limit per player. Signing out stops its use. The script saves a session token so you can stay signed in for up to **7 days**; a backend restart requires signing in again.
+Your Limited key verifies your name and faction and reads your battle stats. We save it **encrypted in Supabase with an expiry of up to 7 days** so NWA can refresh target hospital and availability status in the background, including while you are offline. Checks run every **30 seconds**, within a limit per player. **Sign out and remove key** deletes your saved key. The script saves a session token; a backend restart requires signing in again, while saved keys can still support background checks until they expire.
 
 Only allowed factions can use the list. Instant selection requires an availability check under 30 seconds old. A target can still enter hospital after a check. Battle stats are estimates; attacks are manual.
 

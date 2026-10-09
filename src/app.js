@@ -1,5 +1,5 @@
 // Keep this service hostname and @connect in metadata.txt in sync when deploying elsewhere.
-const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.0' });
+const CONFIG = Object.freeze({ serviceUrl: 'https://targetlist.grusmedia.no', version: '0.4.1' });
 
 const previousHost = document.getElementById('torn-targetlist-host');
 const mountedVersion = previousHost?.getAttribute('data-nwa-version') || '';
@@ -29,7 +29,7 @@ function mountTargetList() {
   const state = {
     token: null, expiresAt: null, player: null, targets: [], warnings: [], generatedAt: null, poolLoadedAt: 0,
     authorizedPool: false, backgroundLoading: false, targetLoad: null, lastPoolAttemptAt: 0, backgroundRenderPending: false,
-    busy: false, open: false, generation: 0, error: '', query: '', mode: 'all',
+    busy: false, removingKey: false, open: false, generation: 0, error: '', query: '', mode: 'all',
     maxRatio: Number.isFinite(savedRatio) && savedRatio >= 0.01 && savedRatio <= 5 ? savedRatio : C.DEFAULT_MAX_RATIO,
     lastTargetId: Number.isSafeInteger(preferences?.lastTargetId) ? preferences.lastTargetId : null,
     finding: false, findGeneration: 0, findAfterLogin: false,
@@ -149,6 +149,7 @@ function mountTargetList() {
     state.authorizedPool = false; state.backgroundLoading = false; state.targetLoad = null; state.lastPoolAttemptAt = 0;
     state.backgroundRenderPending = false;
     state.pendingChecks.clear(); state.busy = false; state.loading = false; state.targetGeneration++; state.expiresAt = null;
+    state.removingKey = false;
     state.view = 'targets'; state.suggestionView = 'pending'; state.suggestions = []; state.nextSuggestionOffset = null;
     state.canReview = false; state.suggestionsLoading = false; state.suggestionGeneration++;
     state.suggestionMutation = null; state.suggestionNotice = ''; state.suggestionDraft = { type: 'player', targetId: '', comment: '' };
@@ -202,8 +203,16 @@ function mountTargetList() {
     const generation = ++state.generation;
     render();
     try {
-      const data = await request('POST', '/api/session', { apiKey }, null);
+      const data = await request('POST', '/api/session', { apiKey, storeKey: true }, null);
       if (generation !== state.generation) return;
+      const storedUntil = Date.parse(data?.keyStorage?.expiresAt);
+      if (data?.keyStorage?.mode !== 'encrypted' || !Number.isFinite(storedUntil) || storedUntil <= Date.now()
+          || storedUntil > Date.now() + 7 * 24 * 60 * 60 * 1000 + 5000) {
+        if (typeof data?.token === 'string' && data.token) {
+          try { await request('DELETE', '/api/session', undefined, data.token); } catch { /* Best-effort cleanup of an incompatible backend session. */ }
+        }
+        throw new Error('Update the NWA backend to enable encrypted key storage.');
+      }
       state.token = data.token; state.expiresAt = data.expiresAt; state.player = data.player;
       saveSession(); await loadTargets();
     } catch (error) { if (generation === state.generation) handleError(error); }
@@ -218,8 +227,25 @@ function mountTargetList() {
   }
 
   async function logout() {
-    const token = state.token; clearSession(); message(''); render();
-    if (token) { try { await request('DELETE', '/api/session', undefined, token); } catch { /* Local credentials are cleared regardless. */ } }
+    if (!state.token || state.removingKey) return;
+    const token = state.token;
+    const generation = ++state.generation;
+    cancelFind(); state.findAfterLogin = false; state.busy = true; state.removingKey = true;
+    state.authorizedPool = false; state.loading = false; state.backgroundLoading = false; state.targetLoad = null;
+    state.targetGeneration++; state.pendingChecks.clear(); state.suggestionGeneration++;
+    state.suggestionsLoading = false; state.suggestionMutation = null;
+    message(''); render();
+    try {
+      // Keep the deletion credential until the backend confirms that the saved key is removed.
+      await request('DELETE', '/api/session', undefined, token);
+      if (generation !== state.generation) return;
+      clearSession(); message(''); render();
+    } catch (error) {
+      if (generation !== state.generation) return;
+      state.busy = false; state.removingKey = false;
+      message(`Key removal was not confirmed. Your sign-in is kept so you can retry. ${error.message || 'Try again shortly.'}`);
+      render();
+    }
   }
   function authorizedPoolFresh() {
     const age = Date.now() - state.poolLoadedAt;
@@ -238,7 +264,7 @@ function mountTargetList() {
     render();
   }
   function loadTargets(force = false, forFind = false, background = false) {
-    if (!state.token || (background && (state.finding || state.pendingChecks.size))) return Promise.resolve(false);
+    if (!state.token || state.removingKey || (background && (state.finding || state.pendingChecks.size))) return Promise.resolve(false);
     if (!forFind && !background) cancelFind();
     if (state.targetLoad && !force) return state.targetLoad.promise;
     const generation = state.generation;
@@ -348,7 +374,7 @@ function mountTargetList() {
     }
   }
   async function checkStatus(id) {
-    if (state.pendingChecks.has(id)) return;
+    if (state.removingKey || state.pendingChecks.has(id)) return;
     state.pendingChecks.add(id); message(''); renderCards();
     const generation = state.generation;
     const targetGeneration = state.targetGeneration;
@@ -367,7 +393,7 @@ function mountTargetList() {
   }
 
   async function loadSuggestions(view = state.suggestionView, append = false) {
-    if (!state.token || (append && (state.suggestionsLoading || state.nextSuggestionOffset === null))) return;
+    if (!state.token || state.removingKey || (append && (state.suggestionsLoading || state.nextSuggestionOffset === null))) return;
     const generation = state.generation;
     const suggestionGeneration = ++state.suggestionGeneration;
     const offset = append ? state.nextSuggestionOffset : 0;
@@ -390,7 +416,7 @@ function mountTargetList() {
   }
 
   async function submitSuggestion() {
-    if (!state.token || state.suggestionMutation) return;
+    if (!state.token || state.removingKey || state.suggestionMutation) return;
     const draft = state.suggestionDraft;
     const targetId = Number(draft.targetId);
     const comment = draft.comment.trim();
@@ -411,7 +437,7 @@ function mountTargetList() {
   }
 
   async function reviewSuggestion(id, decision) {
-    if (!state.token || !state.canReview || state.suggestionMutation || !state.suggestions.some(row => row.id === id && row.status === 'pending')) return;
+    if (!state.token || state.removingKey || !state.canReview || state.suggestionMutation || !state.suggestions.some(row => row.id === id && row.status === 'pending')) return;
     const generation = state.generation;
     state.suggestionMutation = id; state.suggestionNotice = ''; message(''); render();
     try {
@@ -444,18 +470,22 @@ function mountTargetList() {
       const input = element('input'); input.type = 'password'; input.maxLength = 16;
       input.autocomplete = 'off'; input.placeholder = '16-character key'; input.required = true;
       input.disabled = state.busy || state.loading; label.append(input);
-      const submit = element('button', state.loading ? 'Restoring session…' : state.busy ? 'Verifying faction…' : 'Sign in', 'primary'); submit.type = 'submit'; submit.disabled = state.busy || state.loading;
+      const submit = element('button', state.loading ? 'Restoring session…' : state.busy ? 'Verifying faction…' : 'Sign in and save key', 'primary'); submit.type = 'submit'; submit.disabled = state.busy || state.loading;
       form.addEventListener('submit', event => { event.preventDefault(); const key = input.value.trim(); input.value = ''; void login(key); });
       const privacy = element('div', null, 'notice');
-      privacy.append(element('div', `Your key is sent to ${new URL(base).host} and Torn for login, and kept only for this session.`),
-        element('div', 'While NWA is recently active, your key also helps refresh target availability. It stays in backend memory; signing out stops its use.'),
+      privacy.id = 'nwa-key-use'; input.setAttribute('aria-describedby', privacy.id);
+      privacy.append(element('div', 'Your Limited key verifies your name and faction and reads your battle stats.'),
+        element('div', 'Your key is saved encrypted in the backend’s Supabase database and expires after up to 7 days, so target hospital and availability checks continue while you are offline.'),
+        element('div', 'Use “Sign out and remove key” to delete the saved key.'),
         link('Get a Limited API key ↗', 'https://www.torn.com/preferences.php#tab=api'));
-      form.append(label, submit, privacy); content.append(intro, form); return;
+      form.append(privacy, label, submit); content.append(intro, form); return;
     }
     const player = state.player;
     const profile = element('div', null, 'profile'); const identity = element('div');
     identity.append(element('strong', `${player.name} [${player.id}]`), element('div', `${player.faction.name} · Faction ${player.faction.id}`, 'muted'));
-    profile.append(identity, button('Sign out', () => void logout())); content.append(profile);
+    const signOut = button(state.removingKey ? 'Removing key…' : 'Sign out and remove key', () => void logout());
+    signOut.disabled = state.removingKey;
+    profile.append(identity, signOut); content.append(profile);
     const tabs = element('div', null, 'tabs'); tabs.setAttribute('aria-label', 'NWA sections');
     for (const [view, label] of [['targets', 'Targets'], ['suggestions', 'Suggestions']]) {
       const tab = button(label, () => {

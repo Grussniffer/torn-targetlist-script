@@ -13,6 +13,7 @@ const { serviceBase, version: scriptVersion } = vm.runInNewContext(
 const NOW = Date.parse('2026-10-09T12:00:00Z');
 const KEY = 'AbCdEfGh12345678';
 const SESSION = 'opaque-session-token';
+const keyStorage = { mode: 'encrypted', expiresAt: new Date(NOW + 7 * 86400000).toISOString() };
 const player = {
   id: 12345, name: 'Allowed Player', faction: { id: 111, name: 'Allowed Faction' },
   battleStats: { strength: 250_000, defense: 250_000, speed: 250_000, dexterity: 250_000, total: 1_000_000 },
@@ -106,13 +107,18 @@ function fixture(saved = null, preferences = null, existingHost = null, initialN
     const input = find(element => element.tagName === 'INPUT' && element.type === 'password'); input.value = KEY;
     find(element => element.tagName === 'FORM').emit('submit');
     const login = requests.at(-1);
-    response(login, { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player });
+    response(login, { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player, keyStorage });
     await flush();
     response(requests.at(-1), { player, targets, warnings: [], generatedAt: new Date(NOW).toISOString() });
     await flush();
     return login;
   }
-  return { root, host, body, runScript, requests, navigations, storage, writes, storageKey, preferencesKey, timers, timeouts, find, button, response, signIn,
+  async function signOut() {
+    button('Sign out and remove key').emit('click');
+    const deletion = requests.at(-1); response(deletion, null, 204); await flush();
+    return deletion;
+  }
+  return { root, host, body, runScript, requests, navigations, storage, writes, storageKey, preferencesKey, timers, timeouts, find, button, response, signIn, signOut,
     settings: () => find(element => element.className === 'settings-toggle'),
     text: () => textContent(root), setNow: value => { clock = value; },
     setVisibility: value => { document.visibilityState = value; document.emit('visibilitychange'); } };
@@ -176,11 +182,23 @@ test('invalid key input stays local and the password field is cleared on submiss
   assert.equal(app.storage.size, 0);
 });
 
+test('the key-use notice appears before the input and discloses encrypted offline storage and removal', () => {
+  const app = fixture();
+  const form = app.find(element => element.tagName === 'FORM');
+  const notice = app.find(element => element.id === 'nwa-key-use');
+  const input = app.find(element => element.type === 'password');
+  assert.equal(form.children[0], notice);
+  assert.equal(input.attributes.get('aria-describedby'), notice.id);
+  assert.match(textContent(notice), /Limited key verifies your name and faction and reads your battle stats/);
+  assert.match(textContent(notice), /saved encrypted.*Supabase.*up to 7 days.*while you are offline/s);
+  assert.match(textContent(notice), /Sign out and remove key.*delete the saved key/);
+});
+
 test('login posts the key once, stores only the session token, and authorizes target requests', async () => {
   const app = fixture(); const login = await app.signIn();
   assert.equal(login.method, 'POST');
   assert.equal(login.url, `${serviceBase}/api/session`);
-  assert.deepEqual(JSON.parse(login.data), { apiKey: KEY });
+  assert.deepEqual(JSON.parse(login.data), { apiKey: KEY, storeKey: true });
   assert.equal(login.headers.Authorization, undefined);
   assert.equal(login.anonymous, true);
   assert.equal(login.redirect, 'error', 'the key body must not follow redirects');
@@ -193,6 +211,41 @@ test('login posts the key once, stores only the session token, and authorizes ta
   assert.match(app.text(), /Allowed Player \[12345\]/);
   assert.match(app.text(), /Target Player \[98765\]/);
   assert.equal(descendants(app.root).some(element => element.className === 'attack'), false, 'cached Okay status has no attack link');
+});
+
+test('incompatible backend storage confirmation is rejected before saving a token and cleans up its session', async () => {
+  for (const metadata of [undefined, { mode: 'memory', expiresAt: keyStorage.expiresAt },
+    { mode: 'encrypted', expiresAt: 'invalid' }, { mode: 'encrypted', expiresAt: new Date(NOW - 1).toISOString() },
+    { mode: 'encrypted', expiresAt: new Date(NOW + 8 * 86400000).toISOString() }]) {
+    const app = fixture();
+    app.find(element => element.type === 'password').value = KEY;
+    app.find(element => element.tagName === 'FORM').emit('submit');
+    app.response(app.requests[0], { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player, keyStorage: metadata });
+    await flush();
+    assert.equal(app.storage.has(app.storageKey), false, 'unconfirmed encrypted storage must never adopt the token');
+    assert.equal(app.requests.length, 2);
+    const cleanup = app.requests[1];
+    assert.equal(cleanup.method, 'DELETE');
+    assert.equal(cleanup.url, `${serviceBase}/api/session`);
+    assert.equal(cleanup.headers.Authorization, `Bearer ${SESSION}`);
+    assert.equal(cleanup.data, undefined);
+    app.response(cleanup, null, 204); await flush();
+    assert.match(app.text(), /Update the NWA backend to enable encrypted key storage/);
+    assert.equal(app.button('Sign in and save key').disabled, false);
+    assert.equal(app.storage.size, 0);
+    assert.equal(app.requests.some(request => request.url.endsWith('/api/targets')), false);
+    assert.deepEqual(app.navigations, []);
+  }
+});
+
+test('incompatible backend cleanup failure does not adopt the token or hide the required backend update', async () => {
+  const app = fixture(); app.find(element => element.type === 'password').value = KEY;
+  app.find(element => element.tagName === 'FORM').emit('submit');
+  app.response(app.requests[0], { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player }); await flush();
+  app.requests[1].onerror(); await flush();
+  assert.equal(app.storage.size, 0);
+  assert.match(app.text(), /Update the NWA backend to enable encrypted key storage/);
+  assert.equal(app.button('Sign in and save key').disabled, false);
 });
 
 test('a stored session verifies authorization before displaying any targets', async () => {
@@ -288,15 +341,58 @@ test('expired saved credentials are removed before a request is made', () => {
 test('an in-flight status response cannot restore targets after sign out', async () => {
   const app = fixture(); await app.signIn();
   app.button('Check status').emit('click'); const statusRequest = app.requests.at(-1);
-  app.button('Sign out').emit('click'); const logoutRequest = app.requests.at(-1);
+  app.button('Sign out and remove key').emit('click'); const logoutRequest = app.requests.at(-1);
   assert.equal(logoutRequest.method, 'DELETE');
   assert.equal(logoutRequest.headers.Authorization, `Bearer ${SESSION}`);
-  assert.equal(app.storage.size, 0);
+  assert.equal(app.storage.get(app.storageKey).token, SESSION, 'the deletion credential stays available until confirmation');
   app.response(statusRequest, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() });
   app.response(logoutRequest, { ok: true });
   await flush();
   assert.match(app.text(), /Torn Limited API key/);
   assert.equal(descendants(app.root).some(element => element.className === 'attack' || element.className === 'card'), false);
+});
+
+test('failed key deletion retains the token for retry and clears it only after backend confirmation', async () => {
+  for (const outcome of ['storage-unavailable', 'network']) {
+    const app = fixture(); await app.signIn([{ ...target, checkedAt: new Date(NOW).toISOString() }]);
+    app.button('Sign out and remove key').emit('click');
+    const deletion = app.requests.at(-1); const before = app.requests.length;
+    assert.equal(deletion.method, 'DELETE');
+    assert.equal(app.storage.get(app.storageKey).token, SESSION);
+    assert.equal(app.button('Removing key…').disabled, true);
+    app.button('NWA').emit('click'); app.button('Refresh list').emit('click');
+    app.setNow(NOW + 10_000); app.timers[0]();
+    assert.equal(app.requests.length, before, 'key removal blocks target requests and selection');
+    assert.deepEqual(app.navigations, []);
+    if (outcome === 'network') deletion.onerror();
+    else app.response(deletion, { error: { code: 'KEY_STORAGE_UNAVAILABLE', message: 'Saved-key storage is temporarily unavailable.' } }, 503);
+    await flush();
+    assert.equal(app.storage.get(app.storageKey).token, SESSION);
+    assert.match(app.text(), /Allowed Player \[12345\]/);
+    assert.match(app.text(), /Key removal was not confirmed.*kept so you can retry/s);
+    assert.equal(app.button('Sign out and remove key').disabled, false);
+    assert.equal(JSON.stringify([...app.storage.values()]).includes(KEY), false, 'the API key is never saved in the browser');
+    app.button('Sign out and remove key').emit('click');
+    const retry = app.requests.at(-1);
+    assert.notEqual(retry, deletion);
+    assert.equal(retry.headers.Authorization, `Bearer ${SESSION}`);
+    assert.equal(app.storage.get(app.storageKey).token, SESSION);
+    app.response(retry, null, 204); await flush();
+    assert.equal(app.storage.has(app.storageKey), false);
+    assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
+    assert.match(app.text(), /Torn Limited API key/);
+  }
+});
+
+test('a late target selection cannot resume after a failed key-removal attempt', async () => {
+  const app = fixture(); await app.signIn(); app.button('NWA').emit('click');
+  const oldStatus = app.requests.at(-1);
+  app.button('Sign out and remove key').emit('click');
+  app.response(app.requests.at(-1), { error: { code: 'KEY_STORAGE_UNAVAILABLE', message: 'Try key removal again shortly.' } }, 503); await flush();
+  app.response(oldStatus, { id: target.id, status: { state: 'Okay' }, checkedAt: new Date(NOW).toISOString() }); await flush();
+  assert.deepEqual(app.navigations, []);
+  assert.equal(app.storage.get(app.storageKey).token, SESSION);
+  assert.equal(descendants(app.root).some(element => element.className === 'attack'), false);
 });
 
 test('revocation or a faction change during a status check clears the pool and session', async () => {
@@ -366,8 +462,8 @@ test('a forced-fetch timeout unblocks login and ignores a late successful respon
   [...app.timeouts.values()][0]();
   await flush();
   assert.match(app.text(), /timed out/);
-  assert.equal(app.button('Sign in').disabled, false);
-  app.response(login, { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player });
+  assert.equal(app.button('Sign in and save key').disabled, false);
+  app.response(login, { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player, keyStorage });
   await flush();
   assert.equal(app.storage.size, 0);
   assert.equal(app.requests.length, 1);
@@ -641,7 +737,7 @@ test('background faction denial revokes access and a background response cannot 
     const app = fixture(); await app.signIn([{ ...target, checkedAt: new Date(NOW).toISOString() }]);
     app.setNow(NOW + 30_000); app.timers[0](); const background = app.requests.at(-1);
     if (action === 'denial') app.response(background, { error: { code: 'FACTION_NOT_ALLOWED', message: 'Faction access revoked.' } }, 403);
-    else { app.button('Sign out').emit('click'); app.response(background, { player, targets: [target], warnings: [] }); }
+    else { await app.signOut(); app.response(background, { player, targets: [target], warnings: [] }); }
     await flush();
     assert.equal(app.storage.has(app.storageKey), false);
     assert.equal(descendants(app.root).some(element => element.className === 'card'), false);
@@ -775,7 +871,7 @@ test('NWA retries the pool after login succeeded but the initial target feed fai
   const app = fixture();
   app.find(element => element.type === 'password').value = KEY;
   app.find(element => element.tagName === 'FORM').emit('submit');
-  app.response(app.requests.at(-1), { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player }); await flush();
+  app.response(app.requests.at(-1), { token: SESSION, expiresAt: new Date(NOW + 3_600_000).toISOString(), player, keyStorage }); await flush();
   assert.equal(app.requests.at(-1).url, `${serviceBase}/api/targets`);
   app.response(app.requests.at(-1), { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'Target feed is temporarily unavailable.' } }, 503); await flush();
   assert.equal(app.storage.get(app.storageKey).token, SESSION);
@@ -804,7 +900,7 @@ test('NWA refreshes a pool older than 30 seconds before selecting a live target'
 test('signout, expiry, or a refreshed pool prevents an old NWA status response from navigating', async () => {
   for (const interruption of ['logout', 'expire', 'refresh']) {
     const app = fixture(); await app.signIn(); app.button('NWA').emit('click'); const live = app.requests.at(-1);
-    if (interruption === 'logout') app.button('Sign out').emit('click');
+    if (interruption === 'logout') await app.signOut();
     else if (interruption === 'expire') { app.setNow(NOW + 3_600_000); app.timers[0](); }
     else app.button('Refresh list').emit('click');
     const after = app.requests.length;
@@ -844,7 +940,7 @@ test('the stat limit persists separately from the session and is used by NWA aft
   const ratio = app.find(element => element.attributes.get('aria-label') === 'Maximum target stats as percent of your total');
   ratio.value = '40'; ratio.emit('change');
   assert.equal(app.storage.get(app.preferencesKey).maxRatio, 0.4);
-  app.button('Sign out').emit('click');
+  await app.signOut();
   assert.equal(app.storage.has(app.storageKey), false);
   assert.equal(app.storage.get(app.preferencesKey).maxRatio, 0.4);
   assert.equal(JSON.stringify([...app.storage.values()]).includes(KEY), false);
@@ -1037,7 +1133,7 @@ test('sign out during queue loading or mutations ignores late results and clears
       fillSuggestion(app, { comment: 'Must be removed on sign out.' });
       if (action === 'submit') submitSuggestion(app); else app.button('Approve').emit('click');
     }
-    const held = app.requests.at(-1); app.button('Sign out').emit('click'); const count = app.requests.length;
+    const held = app.requests.at(-1); await app.signOut(); const count = app.requests.length;
     app.response(held, action === 'queue' ? { canReview: true, suggestions: [suggestion()], nextOffset: null } : { suggestion: suggestion(), addedPlayers: 1 }); await flush();
     assert.equal(app.requests.length, count, 'a stale mutation must not start new refreshes');
     assert.equal(app.storage.size, 0);

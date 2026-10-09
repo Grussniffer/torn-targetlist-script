@@ -86,8 +86,9 @@ async function mount(viewport = { width: 1280, height: 960 }, scripts = [source]
       let data, status = override?.status || 200;
       if (override) data = override.data;
       else if (url.pathname === '/api/session' && request.method === 'POST') {
-        data = { token: 'mock-session-token', expiresAt: new Date(Date.now() + 3600000).toISOString(), player };
-      } else if (url.pathname === '/api/session' && request.method === 'DELETE') data = { success: true };
+        data = { token: 'mock-session-token', expiresAt: new Date(Date.now() + 3600000).toISOString(), player,
+          keyStorage: { mode: 'encrypted', expiresAt: new Date(Date.now() + 7 * 86400000).toISOString() } };
+      } else if (url.pathname === '/api/session' && request.method === 'DELETE') { status = 204; data = null; }
       else if (url.pathname === '/api/targets') {
         data = { player, targets: structuredClone(targets), generatedAt: new Date(Date.now()).toISOString(), warnings: [] };
       } else if (/^\/api\/targets\/\d+\/status$/.test(url.pathname)) {
@@ -294,13 +295,76 @@ try {
   await wait(dock, () => Boolean(window.__targetlistShadow.querySelector('form.login')));
   assert.match(await shadow(dock, '.header', 'text'), /NWA/);
   assert.match(await shadow(dock, '.header', 'text'), /North West Alliance/);
+  const disclosure = await dock.evaluate(() => {
+    const root = window.__targetlistShadow;
+    const form = root.querySelector('form.login');
+    const input = form.querySelector('input');
+    const notice = root.getElementById(input.getAttribute('aria-describedby'));
+    return { text: notice.textContent, first: form.firstElementChild === notice, submit: form.querySelector('button').textContent };
+  });
+  assert.equal(disclosure.first, true);
+  assert.match(disclosure.text, /saved encrypted.*Supabase.*up to 7 days.*while you are offline/s);
+  assert.match(disclosure.text, /Sign out and remove key/);
+  assert.equal(disclosure.submit, 'Sign in and save key');
   assert.equal(await dock.evaluate(() => window.__mock.requests.length), 0);
   await shadow(dock, '.settings-toggle', 'click');
   await wait(dock, () => window.__targetlistShadow.querySelector('.panel').hidden);
   await shadow(dock, '.settings-toggle', 'click');
   await wait(dock, () => !window.__targetlistShadow.querySelector('.panel').hidden);
+  assert.equal(await dock.evaluate(() => {
+    const scroll = window.__targetlistShadow.querySelector('.scroll');
+    return scroll.scrollWidth <= scroll.clientWidth + 1;
+  }), true, 'the encrypted-key notice fits the mobile login panel without horizontal overflow');
+  await dock.screenshot({ path: path.join(artifacts, 'browser-login-mobile.png'), fullPage: true });
   await dock.close();
   console.log('PASS green NWA edge button, attached settings gear, desktop/mobile launcher screenshots, login without a session');
+
+  const loginGuide = await mount();
+  await shadow(loginGuide, '.settings-toggle', 'click');
+  const loginClip = await loginGuide.evaluate(() => {
+    // Remove only test-page labels outside the actual userscript before clipping its controls.
+    document.querySelector('.mock').remove();
+    for (const label of [...document.body.children]) if (label.textContent === 'MOCK API DATA') label.remove();
+    const root = window.__targetlistShadow;
+    const panel = root.querySelector('.panel').getBoundingClientRect();
+    const dock = root.querySelector('.dock').getBoundingClientRect();
+    const left = Math.max(0, Math.floor(Math.min(panel.left, dock.left)) - 8);
+    const top = Math.max(0, Math.floor(Math.min(panel.top, dock.top)) - 8);
+    const right = Math.min(innerWidth, Math.ceil(Math.max(panel.right, dock.right)) + 8);
+    const bottom = Math.min(innerHeight, Math.ceil(Math.max(panel.bottom, dock.bottom)) + 8);
+    const input = root.querySelector('input[type=password]');
+    if (input.value) throw new Error('Documentation screenshot must contain a blank API key field');
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  });
+  assert(loginClip.width >= 680 && loginClip.width <= 720, JSON.stringify(loginClip));
+  assert.match(await shadow(loginGuide, '#nwa-key-use', 'text'), /saved encrypted.*Supabase.*expires after up to 7 days.*while you are offline/s);
+  assert.equal(await shadow(loginGuide, '.login button', 'text'), 'Sign in and save key');
+  assert.equal(await loginGuide.evaluate(() => window.__mock.requests.length), 0);
+  await loginGuide.screenshot({ path: path.join(workspace, 'docs/images/nwa-login.png'), clip: loginClip });
+  await loginGuide.close();
+  console.log('PASS current documentation login screenshot uses the actual blank-key panel and NWA controls, clipped directly by the browser');
+
+  const legacyBackend = await mount();
+  await legacyBackend.evaluate(() => {
+    window.__mock.overrides['/api/session'] = { status: 200, data: {
+      token: 'legacy-backend-session', expiresAt: new Date(Date.now() + 3600000).toISOString(), player: window.__mock.player
+    } };
+  });
+  await shadow(legacyBackend, '.settings-toggle', 'click');
+  await shadow(legacyBackend, 'input[type=password]', 'fill', 'MockLimitedKey01');
+  await shadow(legacyBackend, 'form', 'submit');
+  await wait(legacyBackend, () => window.__targetlistShadow.querySelector('.error').textContent.includes('Update the NWA backend to enable encrypted key storage'));
+  const legacyRequests = await legacyBackend.evaluate(() => structuredClone(window.__mock.requests));
+  assert.equal(legacyRequests.length, 2);
+  assert.equal(legacyRequests[0].method, 'POST');
+  assert.equal(JSON.parse(legacyRequests[0].data).storeKey, true);
+  assert.equal(legacyRequests[1].method, 'DELETE');
+  assert.equal(legacyRequests[1].headers.Authorization, 'Bearer legacy-backend-session');
+  assert.equal(await legacyBackend.evaluate(() => window.__mock.store.size), 0);
+  assert.equal(await legacyBackend.evaluate(() => window.__targetlistShadow.querySelectorAll('.card').length), 0);
+  assert.equal(legacyBackend.url(), 'about:blank');
+  await legacyBackend.close();
+  console.log('PASS incompatible backend storage confirmation triggers session cleanup and never adopts a token or loads targets');
 
   const quick = await mount();
   await login(quick);
@@ -428,6 +492,7 @@ try {
   assert.equal((await main.evaluate(() => [...window.__targetlistShadow.querySelectorAll('a.attack')].length)), 0);
   assert.equal(await main.evaluate(() => [...window.__mock.store.values()][0]?.token), 'mock-session-token');
   assert.equal(await main.evaluate(() => JSON.stringify([...window.__mock.store.values()]).includes('MockLimitedKey01')), false);
+  assert.equal(await main.evaluate(() => JSON.parse(window.__mock.requests.find(row => row.method === 'POST' && row.path === '/api/session').data).storeKey), true);
   console.log('PASS login, identity, faction, battle stats, local token only, unknown estimates retained');
 
   await shadow(main, 'select', 'select', 'suggested');
@@ -470,6 +535,35 @@ try {
   assert.match(await shadow(main, '.error', 'text'), /Check this target.*again/);
   await main.close();
   console.log('PASS stale status cannot open an attack');
+
+  const deletion = await mount(); await login(deletion);
+  assert.equal(await shadow(deletion, '.profile button', 'text'), 'Sign out and remove key');
+  await deletion.evaluate(() => {
+    window.__mock.holds.push('/api/session');
+    window.__mock.overrides['/api/session'] = { status: 503,
+      data: { error: { code: 'KEY_STORAGE_UNAVAILABLE', message: 'Mock saved-key storage is unavailable' } } };
+  });
+  await shadow(deletion, '.profile button', 'click');
+  await wait(deletion, () => window.__mock.pending.length === 1);
+  assert.equal(await shadow(deletion, '.profile button', 'text'), 'Removing key…');
+  const deleting = await deletion.evaluate(() => ({ requests: window.__mock.requests.length,
+    token: [...window.__mock.store.values()][0]?.token,
+    disabled: window.__targetlistShadow.querySelector('.launcher').disabled }));
+  assert.equal(deleting.token, 'mock-session-token', 'deletion credentials remain until backend confirmation');
+  assert.equal(deleting.disabled, true);
+  await shadow(deletion, '.launcher', 'click');
+  assert.equal(await deletion.evaluate(() => window.__mock.requests.length), deleting.requests);
+  await deletion.evaluate(() => window.__mock.release('/api/session'));
+  await wait(deletion, () => window.__targetlistShadow.querySelector('.error').textContent.includes('Key removal was not confirmed'));
+  assert.match(await shadow(deletion, '.error', 'text'), /kept so you can retry/);
+  assert.equal(await shadow(deletion, '.profile button', 'text'), 'Sign out and remove key');
+  assert.equal(await deletion.evaluate(() => [...window.__mock.store.values()][0]?.token), 'mock-session-token');
+  assert.equal(await deletion.evaluate(() => JSON.stringify([...window.__mock.store.values()]).includes('MockLimitedKey01')), false);
+  await deletion.evaluate(() => { delete window.__mock.overrides['/api/session']; });
+  await signOut(deletion);
+  assert.equal(await deletion.evaluate(() => window.__mock.store.size), 0);
+  await deletion.close();
+  console.log('PASS encrypted-key disclosure and confirmed removal; failed deletion retains the token for retry and blocks selection while pending');
 
   for (const heldPath of ['/api/targets/101/status', '/api/targets']) {
     const race = await mount();
@@ -661,6 +755,7 @@ try {
   console.log('All mocked browser smoke checks passed. No provider requests or live keys used.');
   console.log(`Mock screenshots: ${path.join(artifacts, 'browser-desktop.png')} and ${path.join(artifacts, 'browser-mobile.png')}`);
   console.log(`Mock NWA launcher screenshots: ${path.join(artifacts, 'browser-nwa-launcher-desktop.png')} and ${path.join(artifacts, 'browser-nwa-launcher-mobile.png')}`);
+  console.log(`Mock encrypted-key login screenshot: ${path.join(artifacts, 'browser-login-mobile.png')}`);
   console.log(`Mock suggestion screenshots: ${path.join(artifacts, 'browser-suggestions-desktop.png')} and ${path.join(artifacts, 'browser-suggestions-mobile.png')}`);
 } finally {
   await context.close();
