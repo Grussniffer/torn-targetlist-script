@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Faction Target List
 // @namespace    torn-faction-targetlist
-// @version      0.2.0
-// @description  Faction-verified chain targets, player and faction suggestions, and leader approval.
+// @version      0.2.1
+// @description  Find and suggest chain targets.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
 // @grant        GM_xmlhttpRequest

@@ -262,7 +262,7 @@ function mountTargetList() {
   function render() {
     content.replaceChildren(); cardContainer = null; countNode = null;
     if (!state.player) {
-      const intro = element('p', 'Sign in to see the faction’s target pool matched against your battle stats.');
+      const intro = element('p', 'Find chain targets that match your stats.');
       const form = element('form', null, 'login');
       const label = element('label', 'Torn Limited API key');
       const input = element('input'); input.type = 'password'; input.maxLength = 16;
@@ -271,9 +271,8 @@ function mountTargetList() {
       const submit = element('button', state.loading ? 'Restoring session…' : state.busy ? 'Verifying faction…' : 'Sign in', 'primary'); submit.type = 'submit'; submit.disabled = state.busy || state.loading;
       form.addEventListener('submit', event => { event.preventDefault(); const key = input.value.trim(); input.value = ''; void login(key); });
       const privacy = element('div', null, 'notice');
-      privacy.append(element('div', `Your key is sent to ${new URL(base).host} and Torn for verification. It is kept only in service memory for this session. A session token is stored by your userscript manager until expiry or sign out.`),
-        element('div', 'Only configured factions can access targets. Player keys are never sent to FFScouter.'),
-        link('Create a Limited key in Torn settings ↗', 'https://www.torn.com/preferences.php#tab=api'));
+      privacy.append(element('div', `Your key is sent to ${new URL(base).host} and Torn for login, and kept only for this session.`),
+        link('Get a Limited API key ↗', 'https://www.torn.com/preferences.php#tab=api'));
       form.append(label, submit, privacy); content.append(intro, form); return;
     }
     const player = state.player;

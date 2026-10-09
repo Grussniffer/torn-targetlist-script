@@ -1,9 +1,9 @@
 {
   "name": "torn-targetlist-script",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
-  "description": "Faction-verified Torn target list userscript with player and faction suggestions",
+  "description": "Find and suggest chain targets in Torn",
   "engines": { "node": ">=24" },
   "scripts": {
     "build": "node scripts/build.mjs",
